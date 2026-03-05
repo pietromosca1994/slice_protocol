@@ -1,321 +1,991 @@
-// /// Comprehensive test suite for TrancheFactory.
-// ///
-// /// Test coverage:
-// ///  - Tranche creation with supply caps
-// ///  - Minting by authorised IssuanceAdminCap holder
-// ///  - Supply cap enforcement (exact cap, over cap)
-// ///  - Melting (burning) tokens reduces minted counters
-// ///  - disableMinting prevents further minting
-// ///  - Unauthorised mint attempt is rejected
-// ///  - Remaining supply calculations
-// #[test_only, allow(unused_use, unused_variable, unused_const, duplicate_alias, unused_function)]
-// module securitization::tranche_factory_tests {
-//     use iota::test_scenario::{Self as ts};
-//     use iota::clock::{Self, Clock};
-//     use iota::coin;
-//     use securitization::tranche_factory::{
-//         Self, TrancheRegistry, TrancheAdminCap, IssuanceAdminCap,
-//         SENIOR, MEZZ, JUNIOR,
-//     };
-//     use securitization::errors;
+/// Comprehensive test suite for TrancheFactory.
+///
+/// Covers every method and state variable specified in the design document
+/// (ISC Contract Reference v1.0 — TrancheFactory section):
+///
+///   createTranches()   → create_tranches
+///   mint()             → mint
+///   melt()             → melt_senior / melt_mezz / melt_junior
+///   disableMinting()   → disable_minting
+///   getTrancheInfo()   → get_tranche_info
+///
+/// ## OTW pattern
+///
+/// `coin::create_currency` calls `is_one_time_witness`, a VM-level native
+/// check that cannot be satisfied from any function other than the module's
+/// own `init` entry point — not even from within the same module in a
+/// different function frame.
+///
+/// The correct approach for testing Coin-based modules is:
+///   `coin::create_treasury_cap_for_testing<T>(ctx)` — a `#[test_only]`
+///   framework function that constructs a `TreasuryCap<T>` directly without
+///   going through `create_currency`, bypassing the OTW check entirely.
+///
+/// `init_for_testing(ctx)` uses this helper to build all three treasury caps
+/// and assemble the `TrancheRegistry` without ever calling `create_currency`.
+/// `setup()` calls it with the `ts::begin` genesis context before any `next_tx`.
+///
+/// ## Test groups
+///
+///   1.  Post-init state
+///   2.  createTranches — happy path
+///   3.  createTranches — abort guards
+///   4.  mint — happy paths (all three tranches)
+///   5.  mint — abort guards
+///   6.  melt — happy paths (partial, full, remint cycle)
+///   7.  disableMinting
+///   8.  getTrancheInfo — struct fields
+///   9.  Access control (stranger cannot hold admin / issuance caps)
+///   10. Read-only accessors and tranche-type constants
+#[test_only, allow(unused_use, unused_variable, unused_const, duplicate_alias, unused_function, lint(self_transfer))]
+module securitization::tranche_factory_tests {
+    use iota::test_scenario::{Self as ts, Scenario};
+    use iota::clock::{Self, Clock};
+    use iota::coin::{Self, Coin};
+    use securitization::tranche_factory::{
+        Self,
+        TrancheAdminCap,
+        IssuanceAdminCap,
+        TrancheRegistry,
+        TrancheInfo,
+        SENIOR,
+        MEZZ,
+        JUNIOR,
+    };
+    use securitization::errors;
 
-//     // ─── Addresses ────────────────────────────────────────────────────────────
-//     const ADMIN:     address = @0xB0;
-//     const ISSUANCE:  address = @0xB1;
-//     const INVESTOR1: address = @0xB2;
-//     const INVESTOR2: address = @0xB3;
-//     const POOL:      address = @0xB4;
+    // ─── Test addresses ───────────────────────────────────────────────────────
+    const ADMIN:             address = @0xA0;
+    const ISSUANCE_CONTRACT: address = @0xB0;
+    const INVESTOR:          address = @0xC0;
+    const STRANGER:          address = @0xD0;
 
-//     // ─── Supply caps ──────────────────────────────────────────────────────────
-//     const SENIOR_CAP: u64 = 5_000_000;
-//     const MEZZ_CAP:   u64 = 3_000_000;
-//     const JUNIOR_CAP: u64 = 2_000_000;
+    // ─── Supply cap fixtures (6 decimal places) ───────────────────────────────
+    const SENIOR_CAP: u64 = 1_000_000_000; // 1 000 tokens
+    const MEZZ_CAP:   u64 =   500_000_000; //   500 tokens
+    const JUNIOR_CAP: u64 =   250_000_000; //   250 tokens
 
-//     // ─── Fixture ──────────────────────────────────────────────────────────────
+    // ─── Fixture helpers ──────────────────────────────────────────────────────
 
-//     fun setup_registry(scenario: &mut ts::Scenario, clock: &Clock) {
-//         ts::next_tx(scenario, ADMIN);
-//         {
-//             let cap         = ts::take_from_sender<TrancheAdminCap>(scenario);
-//             let mut registry = ts::take_shared<TrancheRegistry>(scenario);
-//             tranche_factory::create_tranches(
-//                 &cap, &mut registry,
-//                 SENIOR_CAP, MEZZ_CAP, JUNIOR_CAP,
-//                 ISSUANCE, clock, ts::ctx(scenario),
-//             );
-//             ts::return_shared(registry);
-//             ts::return_to_sender(scenario, cap);
-//         };
-//     }
+    /// Must be called immediately after `ts::begin`, before any `next_tx`.
+    /// OTW values are obtained from the defining module's own constructors —
+    /// the only approach that satisfies `is_one_time_witness`.
+    fun setup(scenario: &mut Scenario) {
+        // coin::create_treasury_cap_for_testing bypasses is_one_time_witness,
+        // which is a VM-level check that cannot be satisfied outside a real
+        // module init.  This is the canonical IOTA Move testing pattern.
+        tranche_factory::init_for_testing(ts::ctx(scenario));
+    }
 
-//     // ═══════════════════════════════════════════════════════════════════════════
-//     //  1. Create tranches
-//     // ═══════════════════════════════════════════════════════════════════════════
+    /// Calls create_tranches with standard caps. Advances one transaction.
+    fun setup_and_create(scenario: &mut Scenario, clock: &Clock) {
+        ts::next_tx(scenario, ADMIN);
+        {
+            let cap      = ts::take_from_sender<TrancheAdminCap>(scenario);
+            let mut reg  = ts::take_shared<TrancheRegistry>(scenario);
+            tranche_factory::create_tranches(
+                &cap, &mut reg,
+                SENIOR_CAP, MEZZ_CAP, JUNIOR_CAP,
+                ISSUANCE_CONTRACT,
+                clock,
+                ts::ctx(scenario),
+            );
+            ts::return_shared(reg);
+            ts::return_to_sender(scenario, cap);
+        };
+    }
 
-//     #[test]
-//     fun test_create_tranches_success() {
-//         let mut scenario = ts::begin(ADMIN);
-//         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
-//         ts::next_tx(&mut scenario, ADMIN);
-//         setup_registry(&mut scenario, &clock);
+    /// Mints `amount` of `tranche_type` to `recipient` via IssuanceAdminCap.
+    fun mint_tokens(
+        scenario:     &mut Scenario,
+        clock:        &Clock,
+        tranche_type: u8,
+        amount:       u64,
+        recipient:    address,
+    ) {
+        ts::next_tx(scenario, ISSUANCE_CONTRACT);
+        {
+            let iac     = ts::take_from_sender<IssuanceAdminCap>(scenario);
+            let mut reg = ts::take_shared<TrancheRegistry>(scenario);
+            tranche_factory::mint(
+                &iac, &mut reg,
+                tranche_type, amount, recipient,
+                clock,
+                ts::ctx(scenario),
+            );
+            ts::return_shared(reg);
+            ts::return_to_sender(scenario, iac);
+        };
+    }
 
-//         ts::next_tx(&mut scenario, ADMIN);
-//         {
-//             let registry = ts::take_shared<TrancheRegistry>(&scenario);
-//             assert!(tranche_factory::tranches_created(&registry),       0);
-//             assert!(tranche_factory::minting_enabled(&registry),        1);
-//             assert!(tranche_factory::senior_supply_cap(&registry) == SENIOR_CAP, 2);
-//             assert!(tranche_factory::mezz_supply_cap(&registry)   == MEZZ_CAP,   3);
-//             assert!(tranche_factory::junior_supply_cap(&registry) == JUNIOR_CAP, 4);
-//             assert!(tranche_factory::senior_minted(&registry) == 0,    5);
-//             assert!(tranche_factory::mezz_minted(&registry)   == 0,    6);
-//             assert!(tranche_factory::junior_minted(&registry) == 0,    7);
-//             ts::return_shared(registry);
-//         };
+    // ═════════════════════════════════════════════════════════════════════════
+    //  1. Post-init state
+    // ═════════════════════════════════════════════════════════════════════════
 
-//         clock::destroy_for_testing(clock);
-//         ts::end(scenario);
-//     }
+    #[test]
+    /// After init: all counters zero, minting disabled, admin cap delivered.
+    fun test_init_state() {
+        let mut scenario = ts::begin(ADMIN);
+        setup(&mut scenario);
 
-//     #[test]
-//     #[expected_failure(abort_code = securitization::errors::ETranchesAlreadyCreated)]
-//     fun test_create_tranches_twice_aborts() {
-//         let mut scenario = ts::begin(ADMIN);
-//         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
-//         ts::next_tx(&mut scenario, ADMIN);
-//         setup_registry(&mut scenario, &clock);
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let reg = ts::take_shared<TrancheRegistry>(&scenario);
 
-//         ts::next_tx(&mut scenario, ADMIN);
-//         {
-//             let cap         = ts::take_from_sender<TrancheAdminCap>(&scenario);
-//             let mut registry = ts::take_shared<TrancheRegistry>(&scenario);
-//             tranche_factory::create_tranches(
-//                 &cap, &mut registry, 1_000, 1_000, 1_000,
-//                 ISSUANCE, &clock, ts::ctx(&mut scenario),
-//             );
-//             ts::return_shared(registry);
-//             ts::return_to_sender(&scenario, cap);
-//         };
+            // spec variables: mintingEnabled == false before createTranches
+            assert!(!tranche_factory::minting_enabled(&reg),           0);
+            assert!(!tranche_factory::tranches_created(&reg),          1);
 
-//         clock::destroy_for_testing(clock);
-//         ts::end(scenario);
-//     }
+            // spec variables: supply caps and minted counters all zero
+            assert!(tranche_factory::senior_supply_cap(&reg) == 0,     2);
+            assert!(tranche_factory::mezz_supply_cap(&reg)   == 0,     3);
+            assert!(tranche_factory::junior_supply_cap(&reg) == 0,     4);
+            assert!(tranche_factory::senior_minted(&reg)     == 0,     5);
+            assert!(tranche_factory::mezz_minted(&reg)       == 0,     6);
+            assert!(tranche_factory::junior_minted(&reg)     == 0,     7);
 
-//     #[test]
-//     #[expected_failure(abort_code = securitization::errors::EZeroSupplyCap)]
-//     fun test_create_tranches_zero_cap_aborts() {
-//         let mut scenario = ts::begin(ADMIN);
-//         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
-//         ts::next_tx(&mut scenario, ADMIN);
-//         {
-//             let cap         = ts::take_from_sender<TrancheAdminCap>(&scenario);
-//             let mut registry = ts::take_shared<TrancheRegistry>(&scenario);
-//             tranche_factory::create_tranches(
-//                 &cap, &mut registry, 0, 1_000, 1_000, // zero senior cap
-//                 ISSUANCE, &clock, ts::ctx(&mut scenario),
-//             );
-//             ts::return_shared(registry);
-//             ts::return_to_sender(&scenario, cap);
-//         };
-//         clock::destroy_for_testing(clock);
-//         ts::end(scenario);
-//     }
+            ts::return_shared(reg);
 
-//     // ═══════════════════════════════════════════════════════════════════════════
-//     //  2. Minting tests
-//     // ═══════════════════════════════════════════════════════════════════════════
+            // Admin cap must land in deployer's inventory
+            assert!(ts::has_most_recent_for_sender<TrancheAdminCap>(&scenario), 8);
+        };
 
-//     #[test]
-//     fun test_mint_senior_success() {
-//         let mut scenario = ts::begin(ADMIN);
-//         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
-//         ts::next_tx(&mut scenario, ADMIN);
-//         setup_registry(&mut scenario, &clock);
+        ts::end(scenario);
+    }
 
-//         ts::next_tx(&mut scenario, ISSUANCE);
-//         {
-//             let cap          = ts::take_from_sender<IssuanceAdminCap>(&scenario);
-//             let mut registry = ts::take_shared<TrancheRegistry>(&scenario);
-//             tranche_factory::mint(
-//                 &cap, &mut registry,
-//                 tranche_factory::tranche_senior(),
-//                 1_000_000, INVESTOR1, &clock, ts::ctx(&mut scenario),
-//             );
-//             assert!(tranche_factory::senior_minted(&registry) == 1_000_000, 0);
-//             assert!(tranche_factory::senior_remaining(&registry) == SENIOR_CAP - 1_000_000, 1);
-//             ts::return_shared(registry);
-//             ts::return_to_sender(&scenario, cap);
-//         };
+    // ═════════════════════════════════════════════════════════════════════════
+    //  2. createTranches — happy path
+    // ═════════════════════════════════════════════════════════════════════════
 
-//         // Investor should have received SENIOR coins
-//         ts::next_tx(&mut scenario, INVESTOR1);
-//         {
-//             let coin = ts::take_from_sender<coin::Coin<SENIOR>>(&scenario);
-//             assert!(coin::value(&coin) == 1_000_000, 0);
-//             ts::return_to_sender(&scenario, coin);
-//         };
+    #[test]
+    /// Supply caps stored, mintingEnabled becomes true, remaining == cap.
+    fun test_create_tranches_sets_caps_and_enables_minting() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
 
-//         clock::destroy_for_testing(clock);
-//         ts::end(scenario);
-//     }
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let reg = ts::take_shared<TrancheRegistry>(&scenario);
 
-//     #[test]
-//     fun test_mint_all_three_tranches() {
-//         let mut scenario = ts::begin(ADMIN);
-//         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
-//         ts::next_tx(&mut scenario, ADMIN);
-//         setup_registry(&mut scenario, &clock);
+            // spec: mintingEnabled == true after createTranches
+            assert!(tranche_factory::minting_enabled(&reg),                 0);
+            assert!(tranche_factory::tranches_created(&reg),                1);
 
-//         ts::next_tx(&mut scenario, ISSUANCE);
-//         {
-//             let cap          = ts::take_from_sender<IssuanceAdminCap>(&scenario);
-//             let mut registry = ts::take_shared<TrancheRegistry>(&scenario);
+            // spec: seniorSupplyCap / mezzSupplyCap / juniorSupplyCap
+            assert!(tranche_factory::senior_supply_cap(&reg) == SENIOR_CAP, 2);
+            assert!(tranche_factory::mezz_supply_cap(&reg)   == MEZZ_CAP,   3);
+            assert!(tranche_factory::junior_supply_cap(&reg) == JUNIOR_CAP, 4);
 
-//             tranche_factory::mint(&cap, &mut registry, 0, 1_000_000, INVESTOR1, &clock, ts::ctx(&mut scenario));
-//             tranche_factory::mint(&cap, &mut registry, 1, 500_000,   INVESTOR1, &clock, ts::ctx(&mut scenario));
-//             tranche_factory::mint(&cap, &mut registry, 2, 200_000,   INVESTOR2, &clock, ts::ctx(&mut scenario));
+            // remaining capacity == cap when nothing minted yet
+            assert!(tranche_factory::senior_remaining(&reg) == SENIOR_CAP,  5);
+            assert!(tranche_factory::mezz_remaining(&reg)   == MEZZ_CAP,    6);
+            assert!(tranche_factory::junior_remaining(&reg) == JUNIOR_CAP,  7);
 
-//             assert!(tranche_factory::senior_minted(&registry) == 1_000_000, 0);
-//             assert!(tranche_factory::mezz_minted(&registry)   == 500_000,   1);
-//             assert!(tranche_factory::junior_minted(&registry) == 200_000,   2);
+            // spec: authorizedIssuanceContract stored
+            assert!(tranche_factory::issuance_contract(&reg) == ISSUANCE_CONTRACT, 8);
 
-//             ts::return_shared(registry);
-//             ts::return_to_sender(&scenario, cap);
-//         };
+            ts::return_shared(reg);
+        };
 
-//         clock::destroy_for_testing(clock);
-//         ts::end(scenario);
-//     }
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
 
-//     #[test]
-//     fun test_mint_at_exact_cap() {
-//         let mut scenario = ts::begin(ADMIN);
-//         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
-//         ts::next_tx(&mut scenario, ADMIN);
-//         setup_registry(&mut scenario, &clock);
+    #[test]
+    /// IssuanceAdminCap (= authorizedIssuanceContract capability) must be
+    /// delivered to the issuance contract address after createTranches.
+    fun test_create_tranches_sends_issuance_admin_cap() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
 
-//         ts::next_tx(&mut scenario, ISSUANCE);
-//         {
-//             let cap          = ts::take_from_sender<IssuanceAdminCap>(&scenario);
-//             let mut registry = ts::take_shared<TrancheRegistry>(&scenario);
-//             // Mint exactly the cap
-//             tranche_factory::mint(&cap, &mut registry, 0, SENIOR_CAP, INVESTOR1, &clock, ts::ctx(&mut scenario));
-//             assert!(tranche_factory::senior_minted(&registry) == SENIOR_CAP, 0);
-//             assert!(tranche_factory::senior_remaining(&registry) == 0, 1);
-//             ts::return_shared(registry);
-//             ts::return_to_sender(&scenario, cap);
-//         };
+        ts::next_tx(&mut scenario, ISSUANCE_CONTRACT);
+        {
+            assert!(ts::has_most_recent_for_sender<IssuanceAdminCap>(&scenario), 0);
+        };
 
-//         clock::destroy_for_testing(clock);
-//         ts::end(scenario);
-//     }
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
 
-//     #[test]
-//     #[expected_failure(abort_code = securitization::errors::ESupplyCapExceeded)]
-//     fun test_mint_over_cap_aborts() {
-//         let mut scenario = ts::begin(ADMIN);
-//         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
-//         ts::next_tx(&mut scenario, ADMIN);
-//         setup_registry(&mut scenario, &clock);
+    // ═════════════════════════════════════════════════════════════════════════
+    //  3. createTranches — abort guards
+    // ═════════════════════════════════════════════════════════════════════════
 
-//         ts::next_tx(&mut scenario, ISSUANCE);
-//         {
-//             let cap          = ts::take_from_sender<IssuanceAdminCap>(&scenario);
-//             let mut registry = ts::take_shared<TrancheRegistry>(&scenario);
-//             tranche_factory::mint(&cap, &mut registry, 0, SENIOR_CAP + 1, INVESTOR1, &clock, ts::ctx(&mut scenario));
-//             ts::return_shared(registry);
-//             ts::return_to_sender(&scenario, cap);
-//         };
+    #[test]
+    #[expected_failure(abort_code = securitization::errors::ETranchesAlreadyCreated, location = securitization::tranche_factory)]
+    /// Spec: callable once. Second call must abort.
+    fun test_create_tranches_twice_aborts() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
 
-//         clock::destroy_for_testing(clock);
-//         ts::end(scenario);
-//     }
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let cap      = ts::take_from_sender<TrancheAdminCap>(&scenario);
+            let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            tranche_factory::create_tranches(
+                &cap, &mut reg,
+                SENIOR_CAP, MEZZ_CAP, JUNIOR_CAP,
+                ISSUANCE_CONTRACT, &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, cap);
+        };
 
-//     #[test]
-//     #[expected_failure(abort_code = securitization::errors::EMintingDisabled)]
-//     fun test_mint_when_disabled_aborts() {
-//         let mut scenario = ts::begin(ADMIN);
-//         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
-//         ts::next_tx(&mut scenario, ADMIN);
-//         setup_registry(&mut scenario, &clock);
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
 
-//         // Disable minting
-//         ts::next_tx(&mut scenario, ADMIN);
-//         {
-//             let cap          = ts::take_from_sender<TrancheAdminCap>(&scenario);
-//             let mut registry = ts::take_shared<TrancheRegistry>(&scenario);
-//             tranche_factory::disable_minting(&cap, &mut registry, &clock);
-//             ts::return_shared(registry);
-//             ts::return_to_sender(&scenario, cap);
-//         };
+    #[test]
+    #[expected_failure(abort_code = securitization::errors::EZeroSupplyCap, location = securitization::tranche_factory)]
+    fun test_create_tranches_zero_senior_cap_aborts() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
 
-//         // Try to mint — should fail
-//         ts::next_tx(&mut scenario, ISSUANCE);
-//         {
-//             let cap          = ts::take_from_sender<IssuanceAdminCap>(&scenario);
-//             let mut registry = ts::take_shared<TrancheRegistry>(&scenario);
-//             tranche_factory::mint(&cap, &mut registry, 0, 100, INVESTOR1, &clock, ts::ctx(&mut scenario));
-//             ts::return_shared(registry);
-//             ts::return_to_sender(&scenario, cap);
-//         };
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let cap      = ts::take_from_sender<TrancheAdminCap>(&scenario);
+            let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            tranche_factory::create_tranches(
+                &cap, &mut reg,
+                0, MEZZ_CAP, JUNIOR_CAP,          // ← zero senior cap
+                ISSUANCE_CONTRACT, &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, cap);
+        };
 
-//         clock::destroy_for_testing(clock);
-//         ts::end(scenario);
-//     }
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
 
-//     // ═══════════════════════════════════════════════════════════════════════════
-//     //  3. Melting (burn) tests
-//     // ═══════════════════════════════════════════════════════════════════════════
+    #[test]
+    #[expected_failure(abort_code = securitization::errors::EZeroSupplyCap, location = securitization::tranche_factory)]
+    fun test_create_tranches_zero_mezz_cap_aborts() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
 
-//     #[test]
-//     fun test_melt_senior_success() {
-//         let mut scenario = ts::begin(ADMIN);
-//         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
-//         ts::next_tx(&mut scenario, ADMIN);
-//         setup_registry(&mut scenario, &clock);
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let cap      = ts::take_from_sender<TrancheAdminCap>(&scenario);
+            let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            tranche_factory::create_tranches(
+                &cap, &mut reg,
+                SENIOR_CAP, 0, JUNIOR_CAP,        // ← zero mezz cap
+                ISSUANCE_CONTRACT, &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, cap);
+        };
 
-//         ts::next_tx(&mut scenario, ISSUANCE);
-//         {
-//             let cap          = ts::take_from_sender<IssuanceAdminCap>(&scenario);
-//             let mut registry = ts::take_shared<TrancheRegistry>(&scenario);
-//             tranche_factory::mint(&cap, &mut registry, 0, 1_000_000, INVESTOR1, &clock, ts::ctx(&mut scenario));
-//             ts::return_shared(registry);
-//             ts::return_to_sender(&scenario, cap);
-//         };
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
 
-//         ts::next_tx(&mut scenario, INVESTOR1);
-//         {
-//             let mut registry = ts::take_shared<TrancheRegistry>(&scenario);
-//             let mut coin     = ts::take_from_sender<coin::Coin<SENIOR>>(&scenario);
-//             let half         = coin::split(&mut coin, 500_000, ts::ctx(&mut scenario));
-//             tranche_factory::melt_senior(&mut registry, half, &clock);
-//             assert!(tranche_factory::senior_minted(&registry) == 500_000, 0);
-//             ts::return_shared(registry);
-//             ts::return_to_sender(&scenario, coin); // ← return the remaining 500_000
-//         };
+    #[test]
+    #[expected_failure(abort_code = securitization::errors::EZeroSupplyCap, location = securitization::tranche_factory)]
+    fun test_create_tranches_zero_junior_cap_aborts() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
 
-//         clock::destroy_for_testing(clock);
-//         ts::end(scenario);
-//     }
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let cap      = ts::take_from_sender<TrancheAdminCap>(&scenario);
+            let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            tranche_factory::create_tranches(
+                &cap, &mut reg,
+                SENIOR_CAP, MEZZ_CAP, 0,          // ← zero junior cap
+                ISSUANCE_CONTRACT, &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, cap);
+        };
 
-//     #[test]
-//     fun test_disable_minting_idempotent_state() {
-//         let mut scenario = ts::begin(ADMIN);
-//         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
-//         ts::next_tx(&mut scenario, ADMIN);
-//         setup_registry(&mut scenario, &clock);
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
 
-//         ts::next_tx(&mut scenario, ADMIN);
-//         {
-//             let cap          = ts::take_from_sender<TrancheAdminCap>(&scenario);
-//             let mut registry = ts::take_shared<TrancheRegistry>(&scenario);
-//             tranche_factory::disable_minting(&cap, &mut registry, &clock);
-//             assert!(!tranche_factory::minting_enabled(&registry), 0);
-//             ts::return_shared(registry);
-//             ts::return_to_sender(&scenario, cap);
-//         };
+    #[test]
+    #[expected_failure(abort_code = securitization::errors::ENotIssuanceContract, location = securitization::tranche_factory)]
+    /// spec: authorizedIssuanceContract must not be the zero address.
+    fun test_create_tranches_zero_issuance_address_aborts() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
 
-//         clock::destroy_for_testing(clock);
-//         ts::end(scenario);
-//     }
-// }
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let cap      = ts::take_from_sender<TrancheAdminCap>(&scenario);
+            let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            tranche_factory::create_tranches(
+                &cap, &mut reg,
+                SENIOR_CAP, MEZZ_CAP, JUNIOR_CAP,
+                @0x0,                              // ← zero address
+                &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, cap);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  4. mint() — happy paths
+    // ═════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    /// spec: mint updates seniorMinted and remaining capacity.
+    fun test_mint_senior_updates_counters() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        let amount = 100_000_000u64;
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_senior(), amount, INVESTOR);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let reg = ts::take_shared<TrancheRegistry>(&scenario);
+            assert!(tranche_factory::senior_minted(&reg)    == amount,              0);
+            assert!(tranche_factory::senior_remaining(&reg) == SENIOR_CAP - amount, 1);
+            ts::return_shared(reg);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    /// spec: mint updates mezzMinted and remaining capacity.
+    fun test_mint_mezz_updates_counters() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        let amount = 50_000_000u64;
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_mezz(), amount, INVESTOR);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let reg = ts::take_shared<TrancheRegistry>(&scenario);
+            assert!(tranche_factory::mezz_minted(&reg)    == amount,            0);
+            assert!(tranche_factory::mezz_remaining(&reg) == MEZZ_CAP - amount, 1);
+            ts::return_shared(reg);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    /// spec: mint updates juniorMinted and remaining capacity.
+    fun test_mint_junior_updates_counters() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        let amount = 25_000_000u64;
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_junior(), amount, INVESTOR);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let reg = ts::take_shared<TrancheRegistry>(&scenario);
+            assert!(tranche_factory::junior_minted(&reg)    == amount,              0);
+            assert!(tranche_factory::junior_remaining(&reg) == JUNIOR_CAP - amount, 1);
+            ts::return_shared(reg);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    /// Mint exactly to the supply cap — boundary must succeed.
+    fun test_mint_senior_exactly_at_cap() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_senior(), SENIOR_CAP, INVESTOR);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let reg = ts::take_shared<TrancheRegistry>(&scenario);
+            assert!(tranche_factory::senior_minted(&reg)    == SENIOR_CAP, 0);
+            assert!(tranche_factory::senior_remaining(&reg) == 0,          1);
+            ts::return_shared(reg);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    /// spec: mint delivers coins to `recipient`.
+    fun test_mint_delivers_coin_to_recipient() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        let amount = 100_000_000u64;
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_senior(), amount, INVESTOR);
+
+        ts::next_tx(&mut scenario, INVESTOR);
+        {
+            let coin = ts::take_from_sender<Coin<SENIOR>>(&scenario);
+            assert!(coin::value(&coin) == amount, 0);
+            ts::return_to_sender(&scenario, coin);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    /// All three tranche counters are independent of one another.
+    fun test_mint_all_three_tranches_independent() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        let s_amt = 100_000_000u64;
+        let m_amt =  50_000_000u64;
+        let j_amt =  25_000_000u64;
+
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_senior(), s_amt, INVESTOR);
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_mezz(),   m_amt, INVESTOR);
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_junior(), j_amt, INVESTOR);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let reg = ts::take_shared<TrancheRegistry>(&scenario);
+            assert!(tranche_factory::senior_minted(&reg)    == s_amt,              0);
+            assert!(tranche_factory::mezz_minted(&reg)      == m_amt,              1);
+            assert!(tranche_factory::junior_minted(&reg)    == j_amt,              2);
+            assert!(tranche_factory::senior_remaining(&reg) == SENIOR_CAP - s_amt, 3);
+            assert!(tranche_factory::mezz_remaining(&reg)   == MEZZ_CAP   - m_amt, 4);
+            assert!(tranche_factory::junior_remaining(&reg) == JUNIOR_CAP  - j_amt, 5);
+            ts::return_shared(reg);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  5. mint() — abort guards
+    // ═════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    #[expected_failure(abort_code = securitization::errors::EMintingDisabled, location = securitization::tranche_factory)]
+    /// spec: mint checks mintingEnabled.
+    /// Tests the guard by disabling minting right after the first successful
+    /// mint and verifying that a second mint on the same tranche now aborts.
+    /// (The pre-createTranches path cannot be exercised directly because
+    /// IssuanceAdminCap does not exist before create_tranches runs.)
+    fun test_mint_while_minting_disabled_aborts() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        // First mint succeeds — confirms cap and registry are wired correctly.
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_senior(), 1, INVESTOR);
+
+        // Admin disables minting (spec: disableMinting is irreversible).
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let cap      = ts::take_from_sender<TrancheAdminCap>(&scenario);
+            let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            tranche_factory::disable_minting(&cap, &mut reg, &clock);
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, cap);
+        };
+
+        // Second mint must abort with EMintingDisabled.
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_senior(), 1, INVESTOR);
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = securitization::errors::ESupplyCapExceeded, location = securitization::tranche_factory)]
+    /// spec: mint checks supply cap — one token over must abort.
+    fun test_mint_senior_exceeds_cap_aborts() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_senior(), SENIOR_CAP, INVESTOR);
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_senior(), 1, INVESTOR);
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = securitization::errors::ESupplyCapExceeded, location = securitization::tranche_factory)]
+    fun test_mint_mezz_exceeds_cap_aborts() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_mezz(), MEZZ_CAP, INVESTOR);
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_mezz(), 1, INVESTOR);
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = securitization::errors::ESupplyCapExceeded, location = securitization::tranche_factory)]
+    fun test_mint_junior_exceeds_cap_aborts() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_junior(), JUNIOR_CAP, INVESTOR);
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_junior(), 1, INVESTOR);
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = securitization::errors::EUnknownTrancheType, location = securitization::tranche_factory)]
+    fun test_mint_unknown_tranche_type_aborts() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        mint_tokens(&mut scenario, &clock, 99u8, 1, INVESTOR);
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = securitization::errors::EMintingDisabled, location = securitization::tranche_factory)]
+    /// spec: disableMinting is irreversible — mint must abort after it.
+    fun test_mint_after_disable_minting_aborts() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let cap      = ts::take_from_sender<TrancheAdminCap>(&scenario);
+            let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            tranche_factory::disable_minting(&cap, &mut reg, &clock);
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, cap);
+        };
+
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_senior(), 1, INVESTOR);
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  6. melt() — happy paths
+    // ═════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    /// spec: melt reduces seniorMinted counter by the burned amount.
+    fun test_melt_senior_partial_reduces_counter() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        let mint_amt = 200_000_000u64;
+        let burn_amt = 100_000_000u64;
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_senior(), mint_amt, INVESTOR);
+
+        ts::next_tx(&mut scenario, INVESTOR);
+        {
+            let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            let mut coin = ts::take_from_sender<Coin<SENIOR>>(&scenario);
+            let burn     = coin::split(&mut coin, burn_amt, ts::ctx(&mut scenario));
+            tranche_factory::melt_senior(&mut reg, burn, &clock);
+            assert!(tranche_factory::senior_minted(&reg) == mint_amt - burn_amt, 0);
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, coin);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    /// spec: melt reduces mezzMinted counter.
+    fun test_melt_mezz_partial_reduces_counter() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        let mint_amt = 100_000_000u64;
+        let burn_amt =  50_000_000u64;
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_mezz(), mint_amt, INVESTOR);
+
+        ts::next_tx(&mut scenario, INVESTOR);
+        {
+            let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            let mut coin = ts::take_from_sender<Coin<MEZZ>>(&scenario);
+            let burn     = coin::split(&mut coin, burn_amt, ts::ctx(&mut scenario));
+            tranche_factory::melt_mezz(&mut reg, burn, &clock);
+            assert!(tranche_factory::mezz_minted(&reg) == mint_amt - burn_amt, 0);
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, coin);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    /// spec: melt reduces juniorMinted counter.
+    fun test_melt_junior_partial_reduces_counter() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        let mint_amt = 50_000_000u64;
+        let burn_amt = 25_000_000u64;
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_junior(), mint_amt, INVESTOR);
+
+        ts::next_tx(&mut scenario, INVESTOR);
+        {
+            let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            let mut coin = ts::take_from_sender<Coin<JUNIOR>>(&scenario);
+            let burn     = coin::split(&mut coin, burn_amt, ts::ctx(&mut scenario));
+            tranche_factory::melt_junior(&mut reg, burn, &clock);
+            assert!(tranche_factory::junior_minted(&reg) == mint_amt - burn_amt, 0);
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, coin);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    /// Burn the entire minted supply — counter reaches zero.
+    fun test_melt_senior_full_supply_zeroes_counter() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_senior(), SENIOR_CAP, INVESTOR);
+
+        ts::next_tx(&mut scenario, INVESTOR);
+        {
+            let mut reg = ts::take_shared<TrancheRegistry>(&scenario);
+            let coin    = ts::take_from_sender<Coin<SENIOR>>(&scenario);
+            tranche_factory::melt_senior(&mut reg, coin, &clock);
+            assert!(tranche_factory::senior_minted(&reg) == 0, 0);
+            ts::return_shared(reg);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    /// Melt all → re-mint to cap: freed capacity must be reusable.
+    /// Validates that minted counter correctly tracks burn-then-remint.
+    fun test_melt_then_remint_restores_capacity() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        // Fill cap
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_senior(), SENIOR_CAP, INVESTOR);
+
+        // Burn all
+        ts::next_tx(&mut scenario, INVESTOR);
+        {
+            let mut reg = ts::take_shared<TrancheRegistry>(&scenario);
+            let coin    = ts::take_from_sender<Coin<SENIOR>>(&scenario);
+            tranche_factory::melt_senior(&mut reg, coin, &clock);
+            ts::return_shared(reg);
+        };
+
+        // Re-mint to cap — must succeed
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_senior(), SENIOR_CAP, INVESTOR);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let reg = ts::take_shared<TrancheRegistry>(&scenario);
+            assert!(tranche_factory::senior_minted(&reg) == SENIOR_CAP, 0);
+            ts::return_shared(reg);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  7. disableMinting()
+    // ═════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    /// spec: disableMinting sets mintingEnabled to false. Irreversible.
+    fun test_disable_minting_sets_flag() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let cap      = ts::take_from_sender<TrancheAdminCap>(&scenario);
+            let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            assert!(tranche_factory::minting_enabled(&reg), 0); // sanity
+            tranche_factory::disable_minting(&cap, &mut reg, &clock);
+            assert!(!tranche_factory::minting_enabled(&reg), 1);
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, cap);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  8. getTrancheInfo() — struct fields
+    // ═════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    /// spec: getTrancheInfo returns tokenID, supply cap, amount minted,
+    /// remaining capacity, and current mint status.
+    fun test_get_tranche_info_senior_before_any_mint() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            let info = tranche_factory::get_tranche_info(&reg, tranche_factory::tranche_senior());
+
+            assert!(tranche_factory::info_tranche_type(&info)  == tranche_factory::tranche_senior(), 0);
+            assert!(tranche_factory::info_supply_cap(&info)    == SENIOR_CAP,  1);
+            assert!(tranche_factory::info_amount_minted(&info) == 0,           2);
+            assert!(tranche_factory::info_remaining(&info)     == SENIOR_CAP,  3);
+            assert!(tranche_factory::info_minting_active(&info),               4);
+
+            ts::return_shared(reg);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    /// getTrancheInfo reflects minted amount and reduced remaining after a mint.
+    fun test_get_tranche_info_mezz_after_partial_mint() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        let amount = 50_000_000u64;
+        mint_tokens(&mut scenario, &clock, tranche_factory::tranche_mezz(), amount, INVESTOR);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            let info = tranche_factory::get_tranche_info(&reg, tranche_factory::tranche_mezz());
+
+            assert!(tranche_factory::info_supply_cap(&info)    == MEZZ_CAP,          0);
+            assert!(tranche_factory::info_amount_minted(&info) == amount,            1);
+            assert!(tranche_factory::info_remaining(&info)     == MEZZ_CAP - amount, 2);
+            assert!(tranche_factory::info_minting_active(&info),                     3);
+
+            ts::return_shared(reg);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    /// getTrancheInfo shows minting_active == false after disableMinting.
+    fun test_get_tranche_info_reflects_minting_disabled() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let cap      = ts::take_from_sender<TrancheAdminCap>(&scenario);
+            let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            tranche_factory::disable_minting(&cap, &mut reg, &clock);
+            let info = tranche_factory::get_tranche_info(&reg, tranche_factory::tranche_junior());
+            assert!(!tranche_factory::info_minting_active(&info), 0);
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, cap);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = securitization::errors::EUnknownTrancheType, location = securitization::tranche_factory)]
+    /// getTrancheInfo must abort on unknown tranche type.
+    fun test_get_tranche_info_unknown_type_aborts() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let reg = ts::take_shared<TrancheRegistry>(&scenario);
+            let _   = tranche_factory::get_tranche_info(&reg, 99u8);
+            ts::return_shared(reg);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  9. Access control
+    // ═════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    #[expected_failure(abort_code = iota::test_scenario::EEmptyInventory, location = iota::test_scenario)]
+    /// STRANGER has no TrancheAdminCap → take_from_sender aborts.
+    fun test_stranger_cannot_call_create_tranches() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+
+        ts::next_tx(&mut scenario, STRANGER);
+        {
+            let cap      = ts::take_from_sender<TrancheAdminCap>(&scenario); // aborts here
+            let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            tranche_factory::create_tranches(
+                &cap, &mut reg,
+                SENIOR_CAP, MEZZ_CAP, JUNIOR_CAP,
+                ISSUANCE_CONTRACT, &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, cap);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = iota::test_scenario::EEmptyInventory, location = iota::test_scenario)]
+    /// spec: only authorizedIssuanceContract may call mint.
+    /// STRANGER has no IssuanceAdminCap → take_from_sender aborts.
+    fun test_stranger_cannot_call_mint() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        ts::next_tx(&mut scenario, STRANGER);
+        {
+            let iac     = ts::take_from_sender<IssuanceAdminCap>(&scenario); // aborts here
+            let mut reg = ts::take_shared<TrancheRegistry>(&scenario);
+            tranche_factory::mint(
+                &iac, &mut reg,
+                tranche_factory::tranche_senior(), 1, STRANGER,
+                &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, iac);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = iota::test_scenario::EEmptyInventory, location = iota::test_scenario)]
+    /// STRANGER has no TrancheAdminCap → cannot call disableMinting.
+    fun test_stranger_cannot_disable_minting() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        ts::next_tx(&mut scenario, STRANGER);
+        {
+            let cap      = ts::take_from_sender<TrancheAdminCap>(&scenario); // aborts here
+            let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            tranche_factory::disable_minting(&cap, &mut reg, &clock);
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, cap);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  10. Read-only accessors and type constants
+    // ═════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fun test_tranche_type_constants() {
+        assert!(tranche_factory::tranche_senior() == 0, 0);
+        assert!(tranche_factory::tranche_mezz()   == 1, 1);
+        assert!(tranche_factory::tranche_junior()  == 2, 2);
+    }
+
+    #[test]
+    /// issuance_contract accessor reflects the value set by createTranches.
+    fun test_issuance_contract_accessor() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        setup_and_create(&mut scenario, &clock);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let reg = ts::take_shared<TrancheRegistry>(&scenario);
+            assert!(tranche_factory::issuance_contract(&reg) == ISSUANCE_CONTRACT, 0);
+            ts::return_shared(reg);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+}
