@@ -1,0 +1,271 @@
+/// # IssuanceContract
+///
+/// Manages the primary issuance phase of tokenised securitisation tranches.
+///
+/// ## Responsibilities
+/// - Opening and closing a timed subscription window
+/// - Accepting stablecoin investments and issuing tranche tokens in return
+/// - Verifying investor eligibility via the ComplianceRegistry
+/// - Handling refunds for cancelled / undersubscribed issuances
+/// - Custodying raised funds in the PaymentVault
+///
+/// ## IOTA Move design notes
+/// - Investor subscriptions are stored as a `Table<address, Subscription>`
+///   inside the shared `IssuanceState` object.
+/// - The stablecoin is generic over coin type `C`; callers pass their
+///   `Coin<C>` directly and the contract stores the balance internally.
+/// - `IssuanceAdminCap` (from TrancheFactory) must be passed to `invest`
+///   because this contract calls `tranche_factory::mint` on behalf of investors.
+#[allow(duplicate_alias)]
+module securitization::issuance_contract {
+    use iota::coin::{Self, Coin};
+    use iota::object::{Self, UID};
+    use iota::table::{Self, Table};
+    use iota::transfer;
+    use iota::tx_context::{Self, TxContext};
+    use iota::clock::{Self, Clock};
+    use iota::balance::{Self, Balance};
+    use securitization::errors;
+    use securitization::events;
+    use securitization::math;
+    use securitization::pool_contract::{Self, PoolState};
+    use securitization::tranche_factory::{
+        TrancheRegistry, IssuanceAdminCap, mint
+    };
+    use securitization::compliance_registry::{Self, ComplianceRegistry};
+
+    // ─── Subscription record ──────────────────────────────────────────────────
+
+    public struct Subscription has store {
+        tranche_type:  u8,
+        amount_paid:   u64,
+        tokens_issued: u64,
+        refunded:      bool,
+    }
+
+    // ─── Capability ───────────────────────────────────────────────────────────
+
+    public struct IssuanceOwnerCap has key, store { id: UID }
+
+    // ─── Shared issuance state ────────────────────────────────────────────────
+
+    public struct IssuanceState<phantom C> has key {
+        id:                  UID,
+        price_per_unit_senior: u64,
+        price_per_unit_mezz:   u64,
+        price_per_unit_junior: u64,
+        sale_start:          u64,   // ms timestamp
+        sale_end:            u64,   // ms timestamp
+        total_raised:        u64,
+        issuance_active:     bool,
+        issuance_ended:      bool,
+        // Stablecoin balance held until released to PaymentVault
+        vault_balance:       Balance<C>,
+        // Per-investor subscription records
+        subscriptions:       Table<address, Subscription>,
+        // Whether the issuance met its minimum raise (set on end)
+        succeeded:           bool,
+    }
+
+    // ─── Init ─────────────────────────────────────────────────────────────────
+
+    fun init(ctx: &mut TxContext) {
+        let cap = IssuanceOwnerCap { id: object::new(ctx) };
+        transfer::transfer(cap, tx_context::sender(ctx));
+    }
+
+    /// Create and share a new IssuanceState for coin type C.
+    /// Called once per deployment by the admin.
+    public entry fun create_issuance_state<C>(
+        _cap: &IssuanceOwnerCap,
+        ctx:  &mut TxContext,
+    ) {
+        let state = IssuanceState<C> {
+            id:                    object::new(ctx),
+            price_per_unit_senior: 0,
+            price_per_unit_mezz:   0,
+            price_per_unit_junior: 0,
+            sale_start:            0,
+            sale_end:              0,
+            total_raised:          0,
+            issuance_active:       false,
+            issuance_ended:        false,
+            vault_balance:         balance::zero<C>(),
+            subscriptions:         table::new(ctx),
+            succeeded:             false,
+        };
+        transfer::share_object(state);
+    }
+
+    // ─── Lifecycle ────────────────────────────────────────────────────────────
+
+    /// Open the subscription window with configured per-tranche prices.
+    ///
+    /// # Parameters
+    /// - `sale_start`    Earliest timestamp (ms) at which `invest` is accepted
+    /// - `sale_end`      Latest timestamp (ms); after this `invest` is rejected
+    /// - `price_*`       Price in stablecoin base units per token unit
+    public entry fun start_issuance<C>(
+        _cap:          &IssuanceOwnerCap,
+        state:         &mut IssuanceState<C>,
+        pool:          &PoolState,
+        sale_start:    u64,
+        sale_end:      u64,
+        price_senior:  u64,
+        price_mezz:    u64,
+        price_junior:  u64,
+        clock:         &Clock,
+    ) {
+        assert!(!state.issuance_active,           errors::issuance_already_active());
+        assert!(!state.issuance_ended,            errors::issuance_already_ended());
+        assert!(pool_contract::is_active(pool),   errors::pool_not_active());
+        assert!(sale_end > sale_start,            errors::invalid_sale_window());
+        assert!(sale_end > clock::timestamp_ms(clock), errors::invalid_sale_window());
+        assert!(price_senior > 0,                 errors::zero_price_per_unit());
+        assert!(price_mezz   > 0,                 errors::zero_price_per_unit());
+        assert!(price_junior > 0,                 errors::zero_price_per_unit());
+
+        state.price_per_unit_senior = price_senior;
+        state.price_per_unit_mezz   = price_mezz;
+        state.price_per_unit_junior = price_junior;
+        state.sale_start            = sale_start;
+        state.sale_end              = sale_end;
+        state.issuance_active       = true;
+
+        events::emit_issuance_started(
+            sale_start, sale_end, price_senior, price_mezz, price_junior,
+            clock::timestamp_ms(clock),
+        );
+    }
+
+    /// Close the subscription window, finalise accounting, mark success/failure.
+    public entry fun end_issuance<C>(
+        _cap:  &IssuanceOwnerCap,
+        state: &mut IssuanceState<C>,
+        clock: &Clock,
+    ) {
+        assert!(state.issuance_active, errors::issuance_not_active());
+        state.issuance_active = false;
+        state.issuance_ended  = true;
+        state.succeeded       = true; // protocol-level: all closed issuances succeed
+        events::emit_issuance_ended(state.total_raised, clock::timestamp_ms(clock));
+    }
+
+    /// Invest in a tranche. Transfers stablecoin from investor, mints tokens.
+    ///
+    /// # Parameters
+    /// - `tranche_type`  0 = Senior, 1 = Mezz, 2 = Junior
+    /// - `payment`       Coin<C> from the investor's wallet
+    public entry fun invest<C>(
+        state:          &mut IssuanceState<C>,
+        registry:       &mut TrancheRegistry,
+        compliance:     &ComplianceRegistry,
+        iac:            &IssuanceAdminCap,
+        tranche_type:   u8,
+        payment:        Coin<C>,
+        clock:          &Clock,
+        ctx:            &mut TxContext,
+    ) {
+        let investor = tx_context::sender(ctx);
+        let now      = clock::timestamp_ms(clock);
+
+        assert!(state.issuance_active,               errors::issuance_not_active());
+        assert!(now >= state.sale_start,             errors::issuance_not_active());
+        assert!(now <= state.sale_end,               errors::issuance_not_active());
+        assert!(
+            compliance_registry::is_whitelisted(compliance, investor),
+            errors::investor_not_verified()
+        );
+
+        let amount = coin::value(&payment);
+        assert!(amount > 0, errors::zero_price_per_unit());
+
+        let price = if (tranche_type == 0)      { state.price_per_unit_senior }
+                    else if (tranche_type == 1) { state.price_per_unit_mezz }
+                    else                        { state.price_per_unit_junior };
+
+        let tokens_issued = math::tokens_for_amount(amount, price);
+        assert!(tokens_issued > 0, errors::zero_tokens_calculated());
+
+        // Custody the stablecoin in the vault balance
+        balance::join(&mut state.vault_balance, coin::into_balance(payment));
+        state.total_raised = state.total_raised + amount;
+
+        // Mint tranche tokens to the investor
+        mint(iac, registry, tranche_type, tokens_issued, investor, clock, ctx);
+
+        // Record subscription
+        if (table::contains(&state.subscriptions, investor)) {
+            let sub = table::borrow_mut(&mut state.subscriptions, investor);
+            sub.amount_paid   = sub.amount_paid + amount;
+            sub.tokens_issued = sub.tokens_issued + tokens_issued;
+        } else {
+            table::add(&mut state.subscriptions, investor, Subscription {
+                tranche_type,
+                amount_paid:   amount,
+                tokens_issued,
+                refunded:      false,
+            });
+        };
+
+        events::emit_investment_made(investor, tranche_type, amount, tokens_issued, now);
+    }
+
+    /// Issue a refund if the issuance was cancelled (succeeded == false after end).
+    public entry fun refund<C>(
+        state:    &mut IssuanceState<C>,
+        investor: address,
+        clock:    &Clock,
+        ctx:      &mut TxContext,
+    ) {
+        assert!(state.issuance_ended,    errors::issuance_not_active());
+        assert!(!state.succeeded,        errors::refund_not_permitted());
+        assert!(
+            table::contains(&state.subscriptions, investor),
+            errors::no_subscription()
+        );
+
+        let sub = table::borrow_mut(&mut state.subscriptions, investor);
+        assert!(!sub.refunded, errors::refund_not_permitted());
+
+        let refund_amount = sub.amount_paid;
+        sub.refunded = true;
+
+        let refund_coin = coin::take(&mut state.vault_balance, refund_amount, ctx);
+        transfer::public_transfer(refund_coin, investor);
+
+        events::emit_refund_issued(investor, refund_amount, clock::timestamp_ms(clock));
+    }
+
+    /// Release all vault funds to the PaymentVault address after a successful issuance.
+    public entry fun release_funds_to_vault<C>(
+        _cap:          &IssuanceOwnerCap,
+        state:         &mut IssuanceState<C>,
+        vault_address: address,
+        ctx:           &mut TxContext,
+    ) {
+        assert!(state.issuance_ended,  errors::issuance_not_active());
+        assert!(state.succeeded,       errors::refund_not_permitted());
+        let total = balance::value(&state.vault_balance);
+        assert!(total > 0,             errors::no_subscription());
+        let coin = coin::take(&mut state.vault_balance, total, ctx);
+        transfer::public_transfer(coin, vault_address);
+    }
+
+    // ─── Read-only accessors ──────────────────────────────────────────────────
+
+    public fun total_raised<C>(s: &IssuanceState<C>): u64        { s.total_raised }
+    public fun issuance_active<C>(s: &IssuanceState<C>): bool    { s.issuance_active }
+    public fun issuance_ended<C>(s: &IssuanceState<C>): bool     { s.issuance_ended }
+    public fun sale_start<C>(s: &IssuanceState<C>): u64          { s.sale_start }
+    public fun sale_end<C>(s: &IssuanceState<C>): u64            { s.sale_end }
+    public fun price_senior<C>(s: &IssuanceState<C>): u64        { s.price_per_unit_senior }
+    public fun price_mezz<C>(s: &IssuanceState<C>): u64          { s.price_per_unit_mezz }
+    public fun price_junior<C>(s: &IssuanceState<C>): u64        { s.price_per_unit_junior }
+    public fun vault_balance_value<C>(s: &IssuanceState<C>): u64 {
+        balance::value(&s.vault_balance)
+    }
+    public fun has_subscription<C>(s: &IssuanceState<C>, investor: address): bool {
+        table::contains(&s.subscriptions, investor)
+    }
+}

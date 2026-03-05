@@ -1,0 +1,17 @@
+# Build output
+build/
+
+# Move lock file (commit this if you want reproducible deps, ignore if not)
+# Move.lock
+
+# Test coverage
+coverage/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
