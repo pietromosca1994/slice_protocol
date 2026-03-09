@@ -29,12 +29,18 @@ flavor = "iota"
 
 [env.local]
 chain-id = "f01ee7b9"
-original-published-id = "0xe4cbb022c225e1db2777ee339c4e92d10fa21a5170007d2261a908fd7e9e28fc"
-latest-published-id = "0xe4cbb022c225e1db2777ee339c4e92d10fa21a5170007d2261a908fd7e9e28fc"
+original-published-id = "0x7b6022ac2667d6848379f331e91b97c141d170f49595bf3c07fb7ef8594aa762"
+latest-published-id = "0x7b6022ac2667d6848379f331e91b97c141d170f49595bf3c07fb7ef8594aa762"
 published-version = "1"
 
 [env.localnet]
-chain-id = "403fadf6"
-original-published-id = "0x0000000000000000000000000000000000000000000000000000000000000000"
-latest-published-id = "0xa66eddefe305bd7582ca99226311a98527a373302a71e330b2ac8965304e13ef"
+chain-id = "657f3c30"
+original-published-id = "0xa43533567c799ce31f654f363cdd8546e51b6cd438f1652635882bf92fd84210"
+latest-published-id = "0xa43533567c799ce31f654f363cdd8546e51b6cd438f1652635882bf92fd84210"
+published-version = "1"
+
+[env.testnet]
+chain-id = "2304aa97"
+original-published-id = "0x10da0604db9692946483ae879473448d73cc28a26d66d3f1090981c504f9a067"
+latest-published-id = "0x10da0604db9692946483ae879473448d73cc28a26d66d3f1090981c504f9a067"
 published-version = "1"

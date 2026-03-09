@@ -5,7 +5,8 @@ set -euo pipefail
 # Configuration
 ############################################
 
-NETWORK=${NETWORK:-local}
+NETWORK_ARG=${1:-$NETWORK}
+NETWORK=${NETWORK_ARG:-local}
 PACKAGE_PATH=${PACKAGE_PATH:-./packages/securitization}
 OUTPUT_DIR=${OUTPUT_DIR:-deployments}
 
@@ -21,7 +22,7 @@ RAW_OUTPUT_FILE="$OUTPUT_DIR/publish_${NETWORK}_${TIMESTAMP}.json"
 case "$NETWORK" in
     mainnet) RPC="https://api.mainnet.iota.cafe:443" ;;
     testnet) RPC="https://api.testnet.iota.cafe:443" ;;
-    local)   RPC="http://127.0.0.1:9000" ;;
+    localnet)   RPC="http://127.0.0.1:9000" ;;
     *)
         echo "ERROR: Unknown network '$NETWORK'"
         exit 1
