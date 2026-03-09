@@ -34,13 +34,13 @@ latest-published-id = "0x7b6022ac2667d6848379f331e91b97c141d170f49595bf3c07fb7ef
 published-version = "1"
 
 [env.localnet]
-chain-id = "657f3c30"
-original-published-id = "0xa43533567c799ce31f654f363cdd8546e51b6cd438f1652635882bf92fd84210"
-latest-published-id = "0xa43533567c799ce31f654f363cdd8546e51b6cd438f1652635882bf92fd84210"
+chain-id = "83aabf32"
+original-published-id = "0x3f9f1c9bd96dc5dffef328270f33adc87778efecf82713592089020892d1bff2"
+latest-published-id = "0x3f9f1c9bd96dc5dffef328270f33adc87778efecf82713592089020892d1bff2"
 published-version = "1"
 
 [env.testnet]
 chain-id = "2304aa97"
-original-published-id = "0x10da0604db9692946483ae879473448d73cc28a26d66d3f1090981c504f9a067"
-latest-published-id = "0x10da0604db9692946483ae879473448d73cc28a26d66d3f1090981c504f9a067"
+original-published-id = "0x56d0d4f061bec557963c465d039b302129efa65bd90dc07cbc84e28f46c52afb"
+latest-published-id = "0x56d0d4f061bec557963c465d039b302129efa65bd90dc07cbc84e28f46c52afb"
 published-version = "1"

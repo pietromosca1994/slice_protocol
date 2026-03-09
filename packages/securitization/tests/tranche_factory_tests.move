@@ -72,44 +72,18 @@ module securitization::tranche_factory_tests {
 
     // ─── Fixture helpers ──────────────────────────────────────────────────────
 
-    /// Sets up the full registry in two steps that mirror the production
-    /// deployment flow:
+    /// Sets up the full registry in a single call.
     ///
-    ///   Step 1 (genesis context): `init_for_testing` emits `TrancheAdminCap`
-    ///          to ADMIN.  No registry exists yet.
-    ///
-    ///   Step 2 (next_tx as ADMIN): `initialize_registry` accepts the three
-    ///          test treasury caps and creates the shared `TrancheRegistry`.
+    /// `tranche_factory::init_for_testing` internally creates the
+    /// `TrancheAdminCap` and the shared `TrancheRegistry` (using each coin
+    /// module's `create_treasury_for_testing` bypass) — mirroring what the
+    /// production `init` does via the parking-object handoff, but without
+    /// needing parking wrappers or an explicit two-step flow.
     ///
     /// Must be called immediately after `ts::begin`, before any other
     /// `next_tx` call in the test body.
     fun setup(scenario: &mut Scenario) {
-        // Step 1 — runs in the genesis context (same tx as ts::begin)
         tranche_factory::init_for_testing(ts::ctx(scenario));
-
-        // Step 2 — ADMIN collects the admin cap and boots the registry
-        ts::next_tx(scenario, ADMIN);
-        {
-            let cap = ts::take_from_sender<TrancheAdminCap>(scenario);
-
-            // Build test treasury caps via the bypass helpers in each coin module
-            let senior_treasury =
-                securitization::senior_coin::create_treasury_for_testing(ts::ctx(scenario));
-            let mezz_treasury   =
-                securitization::mezz_coin::create_treasury_for_testing(ts::ctx(scenario));
-            let junior_treasury =
-                securitization::junior_coin::create_treasury_for_testing(ts::ctx(scenario));
-
-            tranche_factory::initialize_registry(
-                &cap,
-                senior_treasury,
-                mezz_treasury,
-                junior_treasury,
-                ts::ctx(scenario),
-            );
-
-            ts::return_to_sender(scenario, cap);
-        };
     }
 
     /// Calls create_tranches with standard caps. Advances one transaction.
@@ -158,8 +132,7 @@ module securitization::tranche_factory_tests {
     // ═════════════════════════════════════════════════════════════════════════
 
     #[test]
-    /// After init + initialize_registry: all counters zero, minting disabled,
-    /// admin cap delivered to ADMIN.
+    /// After init_for_testing: all counters zero, minting disabled, admin cap delivered.
     fun test_init_state() {
         let mut scenario = ts::begin(ADMIN);
         setup(&mut scenario);
