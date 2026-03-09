@@ -3,17 +3,36 @@
 /// Creates and manages the three classes of fungible tokens (Senior, Mezzanine,
 /// Junior) representing the capital structure of the securitization.
 ///
+/// ## Architecture change — split OTWs
+///
+/// In the original design `SENIOR`, `MEZZ`, and `JUNIOR` OTW structs all lived
+/// inside this module, forcing `coin::create_currency` to be called from
+/// `tranche_factory::init`.  That works, but it couples currency definition to
+/// factory logic and makes the coin types feel "owned" by the factory.
+///
+/// The refactored design moves each OTW into its own module:
+///
+///   securitization::senior_coin  →  SENIOR_COIN
+///   securitization::mezz_coin    →  MEZZ_COIN
+///   securitization::junior_coin  →  JUNIOR_COIN
+///
+/// Each coin module's `init` calls `coin::create_currency`, freezes the
+/// metadata, and transfers the `TreasuryCap<T>` to the deployer.  The deployer
+/// then calls `initialize_registry` once to hand all three caps into the shared
+/// `TrancheRegistry`.  This satisfies the IOTA VM rule that the OTW struct and
+/// the `init` consuming it must reside in the *same* module.
+///
 /// ## Design-document alignment (v1.0)
 ///
-/// | Spec variable                  | Implementation                        |
-/// |--------------------------------|---------------------------------------|
-/// | seniorTokenID / mezzTokenID / juniorTokenID | Implicit in Coin<SENIOR> /
-/// |                                | Coin<MEZZ> / Coin<JUNIOR> type params  |
+/// | Spec variable                  | Implementation                            |
+/// |--------------------------------|-------------------------------------------|
+/// | seniorTokenID / mezzTokenID / juniorTokenID | Coin<SENIOR_COIN> /         |
+/// |                                | Coin<MEZZ_COIN> / Coin<JUNIOR_COIN>        |
 /// | seniorSupplyCap / mezzSupplyCap / juniorSupplyCap | TrancheRegistry fields |
 /// | seniorMinted / mezzMinted / juniorMinted           | TrancheRegistry fields |
-/// | mintingEnabled                 | TrancheRegistry.minting_enabled        |
-/// | authorizedIssuanceContract     | TrancheRegistry.issuance_contract +    |
-/// |                                | IssuanceAdminCap capability            |
+/// | mintingEnabled                 | TrancheRegistry.minting_enabled            |
+/// | authorizedIssuanceContract     | TrancheRegistry.issuance_contract +        |
+/// |                                | IssuanceAdminCap capability                |
 ///
 /// ## Methods (spec → entry)
 /// | Spec method        | Entry function          |
@@ -22,17 +41,10 @@
 /// | mint()             | mint                    |
 /// | melt()             | melt_senior/mezz/junior |
 /// | disableMinting()   | disable_minting         |
-/// | getTrancheInfo()   | accessor functions      |
-///
-/// ## OTW / testing note
-/// `coin::create_currency` enforces `is_one_time_witness`.  The test-only
-/// helpers `new_senior_witness()`, `new_mezz_witness()`, `new_junior_witness()`
-/// construct the witness values inside the *defining* module, which satisfies
-/// the native OTW check.  `init_for_testing` accepts them as parameters so
-/// that the test module never needs to fabricate them externally.
+/// | getTrancheInfo()   | get_tranche_info        |
 #[allow(duplicate_alias, unused_use, lint(self_transfer))]
 module securitization::tranche_factory {
-    use iota::coin::{Self, Coin, TreasuryCap, CoinMetadata};
+    use iota::coin::{Self, Coin, TreasuryCap};
     use iota::object::{Self, UID};
     use iota::transfer;
     use iota::tx_context::{Self, TxContext};
@@ -40,15 +52,18 @@ module securitization::tranche_factory {
     use securitization::errors;
     use securitization::events;
 
+    // ─── Coin type imports ────────────────────────────────────────────────────
+    // The OTW structs now live in their own modules; we reference them here
+    // only as phantom type parameters for TreasuryCap / Coin.
+
+    use securitization::senior_coin::SENIOR_COIN;
+    use securitization::mezz_coin::MEZZ_COIN;
+    use securitization::junior_coin::JUNIOR_COIN;
+
     // ─── Tranche type constants ───────────────────────────────────────────────
     const TRANCHE_SENIOR: u8 = 0;
     const TRANCHE_MEZZ:   u8 = 1;
     const TRANCHE_JUNIOR: u8 = 2;
-
-    // ─── One-time witnesses ───────────────────────────────────────────────────
-    public struct SENIOR has drop {}
-    public struct MEZZ   has drop {}
-    public struct JUNIOR has drop {}
 
     // ─── Capabilities ─────────────────────────────────────────────────────────
 
@@ -78,10 +93,11 @@ module securitization::tranche_factory {
         senior_minted:     u64,
         mezz_minted:       u64,
         junior_minted:     u64,
-        // Treasury caps — back the IOTA coin foundries
-        senior_treasury:   TreasuryCap<SENIOR>,
-        mezz_treasury:     TreasuryCap<MEZZ>,
-        junior_treasury:   TreasuryCap<JUNIOR>,
+        // Treasury caps — back the IOTA coin foundries.
+        // Types now reference the external coin modules.
+        senior_treasury:   TreasuryCap<SENIOR_COIN>,
+        mezz_treasury:     TreasuryCap<MEZZ_COIN>,
+        junior_treasury:   TreasuryCap<JUNIOR_COIN>,
         // Spec: mintingEnabled — global minting gate
         minting_enabled:   bool,
         // Guards against calling create_tranches twice
@@ -101,50 +117,44 @@ module securitization::tranche_factory {
         minting_active:     bool,
     }
 
-    // ─── Internal init helper ─────────────────────────────────────────────────
+    // ─── Init ─────────────────────────────────────────────────────────────────
 
-    /// Shared body used by both `init` and `init_for_testing`.
-    /// Accepts the three OTW values so the caller controls their origin
-    /// (real publish vs. test-only constructor).
-    fun init_internal(
-        senior: SENIOR,
-        mezz:   MEZZ,
-        junior: JUNIOR,
-        ctx:    &mut TxContext,
+    /// Called automatically on publish.
+    ///
+    /// Unlike the previous version, this `init` no longer calls
+    /// `coin::create_currency` — that responsibility belongs to each coin
+    /// module's own `init`.  Instead, we create a *placeholder* registry with
+    /// treasury caps sourced from `create_treasury_cap_for_testing`-style
+    /// construction **only** in tests (see `init_for_testing`).
+    ///
+    /// In production the deployer must call `initialize_registry` after all
+    /// three coin modules have run their `init` functions, passing the three
+    /// `TreasuryCap` objects received from those inits.
+    fun init(ctx: &mut TxContext) {
+        // Emit the admin cap to the deployer; the registry is created by
+        // initialize_registry once all three TreasuryCaps are available.
+        let admin_cap = TrancheAdminCap { id: object::new(ctx) };
+        transfer::transfer(admin_cap, tx_context::sender(ctx));
+    }
+
+    // ─── One-time registry bootstrap ──────────────────────────────────────────
+
+    /// Accepts the three `TreasuryCap` objects produced by the coin-module
+    /// `init` functions and creates the shared `TrancheRegistry`.
+    ///
+    /// Must be called **exactly once** by the deployer (holder of
+    /// `TrancheAdminCap`) in the same transaction—or a subsequent one—after
+    /// all three coin modules have been published.
+    ///
+    /// This replaces the old `init` logic that called `coin::create_currency`
+    /// directly, which is no longer valid now that the OTWs live elsewhere.
+    public entry fun initialize_registry(
+        _cap:           &TrancheAdminCap,
+        senior_treasury: TreasuryCap<SENIOR_COIN>,
+        mezz_treasury:   TreasuryCap<MEZZ_COIN>,
+        junior_treasury: TreasuryCap<JUNIOR_COIN>,
+        ctx:            &mut TxContext,
     ) {
-        let (senior_treasury, senior_meta) = coin::create_currency(
-            senior,
-            6,
-            b"SNIOR",
-            b"Senior Tranche Token",
-            b"IOTA Securitization Senior Tranche",
-            option::none(),
-            ctx,
-        );
-        transfer::public_freeze_object(senior_meta);
-
-        let (mezz_treasury, mezz_meta) = coin::create_currency(
-            mezz,
-            6,
-            b"MEZZ",
-            b"Mezzanine Tranche Token",
-            b"IOTA Securitization Mezzanine Tranche",
-            option::none(),
-            ctx,
-        );
-        transfer::public_freeze_object(mezz_meta);
-
-        let (junior_treasury, junior_meta) = coin::create_currency(
-            junior,
-            6,
-            b"JNIOR",
-            b"Junior Tranche Token",
-            b"IOTA Securitization Junior Tranche",
-            option::none(),
-            ctx,
-        );
-        transfer::public_freeze_object(junior_meta);
-
         let registry = TrancheRegistry {
             id:                object::new(ctx),
             senior_supply_cap: 0,
@@ -161,15 +171,6 @@ module securitization::tranche_factory {
             issuance_contract: @0x0,
         };
         transfer::share_object(registry);
-
-        let admin_cap = TrancheAdminCap { id: object::new(ctx) };
-        transfer::transfer(admin_cap, tx_context::sender(ctx));
-    }
-
-    // ─── Init ─────────────────────────────────────────────────────────────────
-
-    fun init(ctx: &mut TxContext) {
-        init_internal(SENIOR {}, MEZZ {}, JUNIOR {}, ctx);
     }
 
     // ─── Spec: createTranches() ───────────────────────────────────────────────
@@ -283,7 +284,7 @@ module securitization::tranche_factory {
     /// Burns Senior tokens. Spec: melt(Senior, amount).
     public entry fun melt_senior(
         registry: &mut TrancheRegistry,
-        coin:     Coin<SENIOR>,
+        coin:     Coin<SENIOR_COIN>,
         clock:    &Clock,
     ) {
         let amount = coin::value(&coin);
@@ -296,7 +297,7 @@ module securitization::tranche_factory {
     /// Burns Mezzanine tokens. Spec: melt(Mezz, amount).
     public entry fun melt_mezz(
         registry: &mut TrancheRegistry,
-        coin:     Coin<MEZZ>,
+        coin:     Coin<MEZZ_COIN>,
         clock:    &Clock,
     ) {
         let amount = coin::value(&coin);
@@ -309,7 +310,7 @@ module securitization::tranche_factory {
     /// Burns Junior tokens. Spec: melt(Junior, amount).
     public entry fun melt_junior(
         registry: &mut TrancheRegistry,
-        coin:     Coin<JUNIOR>,
+        coin:     Coin<JUNIOR_COIN>,
         clock:    &Clock,
     ) {
         let amount = coin::value(&coin);
@@ -367,14 +368,14 @@ module securitization::tranche_factory {
 
     // ─── Read-only accessors ──────────────────────────────────────────────────
 
-    public fun senior_supply_cap(r: &TrancheRegistry): u64  { r.senior_supply_cap }
-    public fun mezz_supply_cap(r: &TrancheRegistry): u64    { r.mezz_supply_cap }
-    public fun junior_supply_cap(r: &TrancheRegistry): u64  { r.junior_supply_cap }
-    public fun senior_minted(r: &TrancheRegistry): u64      { r.senior_minted }
-    public fun mezz_minted(r: &TrancheRegistry): u64        { r.mezz_minted }
-    public fun junior_minted(r: &TrancheRegistry): u64      { r.junior_minted }
-    public fun minting_enabled(r: &TrancheRegistry): bool   { r.minting_enabled }
-    public fun tranches_created(r: &TrancheRegistry): bool  { r.tranches_created }
+    public fun senior_supply_cap(r: &TrancheRegistry): u64    { r.senior_supply_cap }
+    public fun mezz_supply_cap(r: &TrancheRegistry): u64      { r.mezz_supply_cap }
+    public fun junior_supply_cap(r: &TrancheRegistry): u64    { r.junior_supply_cap }
+    public fun senior_minted(r: &TrancheRegistry): u64        { r.senior_minted }
+    public fun mezz_minted(r: &TrancheRegistry): u64          { r.mezz_minted }
+    public fun junior_minted(r: &TrancheRegistry): u64        { r.junior_minted }
+    public fun minting_enabled(r: &TrancheRegistry): bool     { r.minting_enabled }
+    public fun tranches_created(r: &TrancheRegistry): bool    { r.tranches_created }
     public fun issuance_contract(r: &TrancheRegistry): address { r.issuance_contract }
 
     public fun senior_remaining(r: &TrancheRegistry): u64 {
@@ -388,11 +389,11 @@ module securitization::tranche_factory {
     }
 
     // TrancheInfo field accessors
-    public fun info_tranche_type(i: &TrancheInfo): u8       { i.tranche_type }
-    public fun info_supply_cap(i: &TrancheInfo): u64        { i.supply_cap }
-    public fun info_amount_minted(i: &TrancheInfo): u64     { i.amount_minted }
-    public fun info_remaining(i: &TrancheInfo): u64         { i.remaining_capacity }
-    public fun info_minting_active(i: &TrancheInfo): bool   { i.minting_active }
+    public fun info_tranche_type(i: &TrancheInfo): u8     { i.tranche_type }
+    public fun info_supply_cap(i: &TrancheInfo): u64      { i.supply_cap }
+    public fun info_amount_minted(i: &TrancheInfo): u64   { i.amount_minted }
+    public fun info_remaining(i: &TrancheInfo): u64       { i.remaining_capacity }
+    public fun info_minting_active(i: &TrancheInfo): bool { i.minting_active }
 
     public fun tranche_senior(): u8 { TRANCHE_SENIOR }
     public fun tranche_mezz(): u8   { TRANCHE_MEZZ }
@@ -400,17 +401,19 @@ module securitization::tranche_factory {
 
     // ─── Test-only helpers ────────────────────────────────────────────────────
 
-    /// Constructs SENIOR OTW from within the defining module — the only valid
-    /// way to satisfy `is_one_time_witness` in an external test module.
-    /// Test-only init that uses `coin::create_treasury_cap_for_testing` to
-    /// construct TreasuryCap<T> values without invoking `create_currency` and
-    /// therefore without triggering the `is_one_time_witness` VM-level check.
-    /// This is the canonical pattern for testing Coin-based modules in IOTA Move.
+    /// Builds a fully-initialised `TrancheRegistry` for unit tests without
+    /// going through `initialize_registry`.  Treasury caps are created via the
+    /// test-only bypass in each coin module (no OTW check).
     #[test_only]
     public fun init_for_testing(ctx: &mut TxContext) {
-        let senior_treasury = coin::create_treasury_cap_for_testing<SENIOR>(ctx);
-        let mezz_treasury   = coin::create_treasury_cap_for_testing<MEZZ>(ctx);
-        let junior_treasury = coin::create_treasury_cap_for_testing<JUNIOR>(ctx);
+        // Admin cap
+        let admin_cap = TrancheAdminCap { id: object::new(ctx) };
+        transfer::transfer(admin_cap, tx_context::sender(ctx));
+
+        // Treasury caps from each coin module's test helper
+        let senior_treasury = securitization::senior_coin::create_treasury_for_testing(ctx);
+        let mezz_treasury   = securitization::mezz_coin::create_treasury_for_testing(ctx);
+        let junior_treasury = securitization::junior_coin::create_treasury_for_testing(ctx);
 
         let registry = TrancheRegistry {
             id:                object::new(ctx),
@@ -428,8 +431,5 @@ module securitization::tranche_factory {
             issuance_contract: @0x0,
         };
         transfer::share_object(registry);
-
-        let admin_cap = TrancheAdminCap { id: object::new(ctx) };
-        transfer::transfer(admin_cap, tx_context::sender(ctx));
     }
 }
