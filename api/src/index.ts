@@ -12,7 +12,8 @@ import poolRoutes from './routes/pool';
 import complianceRoutes from './routes/compliance';
 import trancheRoutes from './routes/tranches';
 import issuanceRoutes from './routes/issuance';
-import { vaultRouter, waterfallRouter } from './routes/vaultAndWaterfall';
+import vaultRoutes from './routes/vault';
+import waterfallRoutes from './routes/waterfall';
 
 const app = express();
 
@@ -41,8 +42,8 @@ app.use('/api/v1/pool', poolRoutes);
 app.use('/api/v1/compliance', complianceRoutes);
 app.use('/api/v1/tranches', trancheRoutes);
 app.use('/api/v1/issuance', issuanceRoutes);
-app.use('/api/v1/vault', vaultRouter);
-app.use('/api/v1/waterfall', waterfallRouter);
+app.use('/api/v1/vault', vaultRoutes);
+app.use('/api/v1/waterfall', waterfallRoutes);
 
 // ─── 404 ──────────────────────────────────────────────────────────────────────
 app.use((_req, res) => {
