@@ -1,17 +1,31 @@
-# Build output
+# ─── Build output ─────────────────────────────────────────────────────────────
+dist/
 build/
 
-# Move lock file (commit this if you want reproducible deps, ignore if not)
-# Move.lock
+# ─── Dependencies ─────────────────────────────────────────────────────────────
+node_modules/
 
-# Test coverage
+# ─── Environment & secrets ────────────────────────────────────────────────────
+.env
+.env.localnet
+.env.testnet
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+npm-debug.log*
+
+# ─── Test coverage ────────────────────────────────────────────────────────────
 coverage/
 
-# IDE
+# ─── Move artifacts (keep if monorepo also contains Move contracts) ───────────
+# Move.lock
+
+# ─── IDE ──────────────────────────────────────────────────────────────────────
 .idea/
 .vscode/
 *.iml
 
-# OS
+# ─── OS ───────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db

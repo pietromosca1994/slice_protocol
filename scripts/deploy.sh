@@ -29,11 +29,14 @@ case "$NETWORK" in
         ;;
 esac
 
+ACTIVE_ADDRESS=$(iota client active-address)
+
 ############################################
 # Configure IOTA client
 ############################################
 
 echo "Using network: $NETWORK"
+echo "Active address: $ACTIVE_ADDRESS"
 
 iota client switch --env "$NETWORK" >/dev/null 2>&1 || \
 iota client new-env --alias "$NETWORK" --rpc "$RPC"
@@ -83,13 +86,13 @@ PACKAGE_ID=$(jq -r '
 CREATED_OBJECTS=$(jq -r '
     .objectChanges[]
     | select(.type=="created")
-    | "\(.objectType)  ->  \(.objectId)"
+    | "\(.objectId)  (\(.objectType | split("::")[-1]))"
 ' <<< "$JSON_OUTPUT")
 
 UPDATED_OBJECTS=$(jq -r '
-    .objectChanges[]?
+    .objectChanges[]
     | select(.type=="mutated")
-    | "\(.objectType)  ->  \(.objectId)"
+    | "\(.objectId)  (\(.objectType | split("::")[-1]))"
 ' <<< "$JSON_OUTPUT")
 
 ############################################
