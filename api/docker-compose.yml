@@ -1,0 +1,60 @@
+version: '3.9'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: iota-securitization-api:latest
+    container_name: iota-sec-api
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      # Network selection — override per environment
+      - IOTA_NETWORK=${IOTA_NETWORK:-testnet}
+      - IOTA_MAINNET_RPC_URL=${IOTA_MAINNET_RPC_URL:-https://api.mainnet.iota.cafe}
+      - IOTA_TESTNET_RPC_URL=${IOTA_TESTNET_RPC_URL:-https://api.testnet.iota.cafe}
+      - IOTA_LOCALNET_RPC_URL=${IOTA_LOCALNET_RPC_URL:-http://localnet:9000}
+
+      # Signer (injected from .env or CI secrets — never hard-coded)
+      - SIGNER_PRIVATE_KEY=${SIGNER_PRIVATE_KEY}
+
+      # Contract addresses
+      - PACKAGE_ID=${PACKAGE_ID}
+      - POOL_STATE_ID=${POOL_STATE_ID}
+      - COMPLIANCE_REGISTRY_ID=${COMPLIANCE_REGISTRY_ID}
+      - TRANCHE_REGISTRY_ID=${TRANCHE_REGISTRY_ID}
+      - WATERFALL_STATE_ID=${WATERFALL_STATE_ID}
+      - SENIOR_TREASURY_ID=${SENIOR_TREASURY_ID}
+      - MEZZ_TREASURY_ID=${MEZZ_TREASURY_ID}
+      - JUNIOR_TREASURY_ID=${JUNIOR_TREASURY_ID}
+
+      # Capability objects
+      - ADMIN_CAP_ID=${ADMIN_CAP_ID}
+      - ORACLE_CAP_ID=${ORACLE_CAP_ID}
+      - COMPLIANCE_ADMIN_CAP_ID=${COMPLIANCE_ADMIN_CAP_ID}
+      - TRANCHE_ADMIN_CAP_ID=${TRANCHE_ADMIN_CAP_ID}
+      - ISSUANCE_ADMIN_CAP_ID=${ISSUANCE_ADMIN_CAP_ID}
+      - VAULT_ADMIN_CAP_ID=${VAULT_ADMIN_CAP_ID}
+      - WATERFALL_ADMIN_CAP_ID=${WATERFALL_ADMIN_CAP_ID}
+      - ISSUANCE_OWNER_CAP_ID=${ISSUANCE_OWNER_CAP_ID}
+
+      - CLOCK_OBJECT_ID=${CLOCK_OBJECT_ID:-0x0000000000000000000000000000000000000000000000000000000000000006}
+
+      - PORT=3000
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Optional: local IOTA node for development/testing
+  # localnet:
+  #   image: iotaledger/iota-node:latest
+  #   container_name: iota-localnet
+  #   ports:
+  #     - "9000:9000"
+  #     - "9123:9123"

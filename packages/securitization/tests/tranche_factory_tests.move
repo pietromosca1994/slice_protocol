@@ -9,21 +9,23 @@
 ///   disableMinting()   → disable_minting
 ///   getTrancheInfo()   → get_tranche_info
 ///
-/// ## OTW pattern
+/// ## OTW / architecture change
 ///
-/// `coin::create_currency` calls `is_one_time_witness`, a VM-level native
-/// check that cannot be satisfied from any function other than the module's
-/// own `init` entry point — not even from within the same module in a
-/// different function frame.
+/// The three OTW structs (`SENIOR_COIN`, `MEZZ_COIN`, `JUNIOR_COIN`) now live
+/// in their own modules (`senior_coin`, `mezz_coin`, `junior_coin`).  Each
+/// coin module exposes a `#[test_only]` `create_treasury_for_testing` helper
+/// that constructs a `TreasuryCap<T>` via the framework bypass, skipping the
+/// `is_one_time_witness` VM check.
 ///
-/// The correct approach for testing Coin-based modules is:
-///   `coin::create_treasury_cap_for_testing<T>(ctx)` — a `#[test_only]`
-///   framework function that constructs a `TreasuryCap<T>` directly without
-///   going through `create_currency`, bypassing the OTW check entirely.
+/// `tranche_factory::init_for_testing` still creates the `TrancheAdminCap`,
+/// but no longer creates the `TrancheRegistry` — that now requires
+/// `initialize_registry` to be called with the three treasury caps.
 ///
-/// `init_for_testing(ctx)` uses this helper to build all three treasury caps
-/// and assemble the `TrancheRegistry` without ever calling `create_currency`.
-/// `setup()` calls it with the `ts::begin` genesis context before any `next_tx`.
+/// `setup()` therefore:
+///   1. Calls `tranche_factory::init_for_testing` (emits `TrancheAdminCap`)
+///   2. Advances one transaction as ADMIN
+///   3. Calls `initialize_registry` with test treasury caps to produce the
+///      shared `TrancheRegistry`
 ///
 /// ## Test groups
 ///
@@ -42,15 +44,18 @@ module securitization::tranche_factory_tests {
     use iota::test_scenario::{Self as ts, Scenario};
     use iota::clock::{Self, Clock};
     use iota::coin::{Self, Coin};
+
+    // Coin types now come from their own modules
+    use securitization::senior_coin::SENIOR_COIN;
+    use securitization::mezz_coin::MEZZ_COIN;
+    use securitization::junior_coin::JUNIOR_COIN;
+
     use securitization::tranche_factory::{
         Self,
         TrancheAdminCap,
         IssuanceAdminCap,
         TrancheRegistry,
         TrancheInfo,
-        SENIOR,
-        MEZZ,
-        JUNIOR,
     };
     use securitization::errors;
 
@@ -67,13 +72,17 @@ module securitization::tranche_factory_tests {
 
     // ─── Fixture helpers ──────────────────────────────────────────────────────
 
-    /// Must be called immediately after `ts::begin`, before any `next_tx`.
-    /// OTW values are obtained from the defining module's own constructors —
-    /// the only approach that satisfies `is_one_time_witness`.
+    /// Sets up the full registry in a single call.
+    ///
+    /// `tranche_factory::init_for_testing` internally creates the
+    /// `TrancheAdminCap` and the shared `TrancheRegistry` (using each coin
+    /// module's `create_treasury_for_testing` bypass) — mirroring what the
+    /// production `init` does via the parking-object handoff, but without
+    /// needing parking wrappers or an explicit two-step flow.
+    ///
+    /// Must be called immediately after `ts::begin`, before any other
+    /// `next_tx` call in the test body.
     fun setup(scenario: &mut Scenario) {
-        // coin::create_treasury_cap_for_testing bypasses is_one_time_witness,
-        // which is a VM-level check that cannot be satisfied outside a real
-        // module init.  This is the canonical IOTA Move testing pattern.
         tranche_factory::init_for_testing(ts::ctx(scenario));
     }
 
@@ -123,7 +132,7 @@ module securitization::tranche_factory_tests {
     // ═════════════════════════════════════════════════════════════════════════
 
     #[test]
-    /// After init: all counters zero, minting disabled, admin cap delivered.
+    /// After init_for_testing: all counters zero, minting disabled, admin cap delivered.
     fun test_init_state() {
         let mut scenario = ts::begin(ADMIN);
         setup(&mut scenario);
@@ -435,7 +444,7 @@ module securitization::tranche_factory_tests {
     }
 
     #[test]
-    /// spec: mint delivers coins to `recipient`.
+    /// spec: mint delivers Coin<SENIOR_COIN> to `recipient`.
     fun test_mint_delivers_coin_to_recipient() {
         let mut scenario = ts::begin(ADMIN);
         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
@@ -447,7 +456,8 @@ module securitization::tranche_factory_tests {
 
         ts::next_tx(&mut scenario, INVESTOR);
         {
-            let coin = ts::take_from_sender<Coin<SENIOR>>(&scenario);
+            // Coin type is now SENIOR_COIN from the external coin module
+            let coin = ts::take_from_sender<Coin<SENIOR_COIN>>(&scenario);
             assert!(coin::value(&coin) == amount, 0);
             ts::return_to_sender(&scenario, coin);
         };
@@ -495,20 +505,17 @@ module securitization::tranche_factory_tests {
     #[test]
     #[expected_failure(abort_code = securitization::errors::EMintingDisabled, location = securitization::tranche_factory)]
     /// spec: mint checks mintingEnabled.
-    /// Tests the guard by disabling minting right after the first successful
-    /// mint and verifying that a second mint on the same tranche now aborts.
-    /// (The pre-createTranches path cannot be exercised directly because
-    /// IssuanceAdminCap does not exist before create_tranches runs.)
+    /// Disables minting right after first successful mint, verifies second aborts.
     fun test_mint_while_minting_disabled_aborts() {
         let mut scenario = ts::begin(ADMIN);
         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
         setup(&mut scenario);
         setup_and_create(&mut scenario, &clock);
 
-        // First mint succeeds — confirms cap and registry are wired correctly.
+        // First mint succeeds
         mint_tokens(&mut scenario, &clock, tranche_factory::tranche_senior(), 1, INVESTOR);
 
-        // Admin disables minting (spec: disableMinting is irreversible).
+        // Admin disables minting (spec: disableMinting is irreversible)
         ts::next_tx(&mut scenario, ADMIN);
         {
             let cap      = ts::take_from_sender<TrancheAdminCap>(&scenario);
@@ -518,7 +525,7 @@ module securitization::tranche_factory_tests {
             ts::return_to_sender(&scenario, cap);
         };
 
-        // Second mint must abort with EMintingDisabled.
+        // Second mint must abort with EMintingDisabled
         mint_tokens(&mut scenario, &clock, tranche_factory::tranche_senior(), 1, INVESTOR);
 
         clock::destroy_for_testing(clock);
@@ -628,7 +635,7 @@ module securitization::tranche_factory_tests {
         ts::next_tx(&mut scenario, INVESTOR);
         {
             let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
-            let mut coin = ts::take_from_sender<Coin<SENIOR>>(&scenario);
+            let mut coin = ts::take_from_sender<Coin<SENIOR_COIN>>(&scenario);
             let burn     = coin::split(&mut coin, burn_amt, ts::ctx(&mut scenario));
             tranche_factory::melt_senior(&mut reg, burn, &clock);
             assert!(tranche_factory::senior_minted(&reg) == mint_amt - burn_amt, 0);
@@ -655,7 +662,7 @@ module securitization::tranche_factory_tests {
         ts::next_tx(&mut scenario, INVESTOR);
         {
             let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
-            let mut coin = ts::take_from_sender<Coin<MEZZ>>(&scenario);
+            let mut coin = ts::take_from_sender<Coin<MEZZ_COIN>>(&scenario);
             let burn     = coin::split(&mut coin, burn_amt, ts::ctx(&mut scenario));
             tranche_factory::melt_mezz(&mut reg, burn, &clock);
             assert!(tranche_factory::mezz_minted(&reg) == mint_amt - burn_amt, 0);
@@ -682,7 +689,7 @@ module securitization::tranche_factory_tests {
         ts::next_tx(&mut scenario, INVESTOR);
         {
             let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
-            let mut coin = ts::take_from_sender<Coin<JUNIOR>>(&scenario);
+            let mut coin = ts::take_from_sender<Coin<JUNIOR_COIN>>(&scenario);
             let burn     = coin::split(&mut coin, burn_amt, ts::ctx(&mut scenario));
             tranche_factory::melt_junior(&mut reg, burn, &clock);
             assert!(tranche_factory::junior_minted(&reg) == mint_amt - burn_amt, 0);
@@ -707,7 +714,7 @@ module securitization::tranche_factory_tests {
         ts::next_tx(&mut scenario, INVESTOR);
         {
             let mut reg = ts::take_shared<TrancheRegistry>(&scenario);
-            let coin    = ts::take_from_sender<Coin<SENIOR>>(&scenario);
+            let coin    = ts::take_from_sender<Coin<SENIOR_COIN>>(&scenario);
             tranche_factory::melt_senior(&mut reg, coin, &clock);
             assert!(tranche_factory::senior_minted(&reg) == 0, 0);
             ts::return_shared(reg);
@@ -733,7 +740,7 @@ module securitization::tranche_factory_tests {
         ts::next_tx(&mut scenario, INVESTOR);
         {
             let mut reg = ts::take_shared<TrancheRegistry>(&scenario);
-            let coin    = ts::take_from_sender<Coin<SENIOR>>(&scenario);
+            let coin    = ts::take_from_sender<Coin<SENIOR_COIN>>(&scenario);
             tranche_factory::melt_senior(&mut reg, coin, &clock);
             ts::return_shared(reg);
         };

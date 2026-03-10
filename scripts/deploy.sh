@@ -1,162 +1,127 @@
 #!/usr/bin/env bash
-# =============================================================================
-#  IOTA Securitization Protocol — Deployment Script
-#  Usage: ./scripts/deploy.sh [testnet|mainnet]
-# =============================================================================
-
 set -euo pipefail
 
-NETWORK=${1:-testnet}
+############################################
+# Configuration
+############################################
 
-echo ""
-echo "╔══════════════════════════════════════════════════════╗"
-echo "║   IOTA Securitization Protocol — Deploying to       ║"
-echo "║   Network: ${NETWORK}                               ║"
-echo "╚══════════════════════════════════════════════════════╝"
-echo ""
+NETWORK_ARG=${1:-$NETWORK}
+NETWORK=${NETWORK_ARG:-local}
+PACKAGE_PATH=${PACKAGE_PATH:-./packages/securitization}
+OUTPUT_DIR=${OUTPUT_DIR:-deployments}
 
-# ── Validate prerequisites ────────────────────────────────────────────────────
+mkdir -p "$OUTPUT_DIR"
 
-if ! command -v iota &> /dev/null; then
-    echo "ERROR: iota CLI not found. Install from https://docs.iota.org/developer/getting-started/install-iota"
-    exit 1
-fi
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+RAW_OUTPUT_FILE="$OUTPUT_DIR/publish_${NETWORK}_${TIMESTAMP}.json"
 
-if ! command -v jq &> /dev/null; then
-    echo "ERROR: jq not found. Install with: apt-get install jq / brew install jq"
-    exit 1
-fi
+############################################
+# Network selection
+############################################
 
-# ── Environment ───────────────────────────────────────────────────────────────
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-DEPLOY_DIR="$PROJECT_ROOT/deployments"
-TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
-DEPLOY_FILE="$DEPLOY_DIR/${NETWORK}_${TIMESTAMP}.json"
-
-mkdir -p "$DEPLOY_DIR"
-
-echo "Project root : $PROJECT_ROOT"
-echo "Deployment   : $DEPLOY_FILE"
-echo ""
-
-# ── Configure IOTA CLI network ────────────────────────────────────────────────
-
-if [ "$NETWORK" = "mainnet" ]; then
-    iota client switch --env mainnet 2>/dev/null || \
-        iota client new-env --alias mainnet --rpc https://api.mainnet.iota.cafe:443
-    iota client switch --env mainnet
-elif [ "$NETWORK" = "testnet" ]; then
-    iota client switch --env testnet 2>/dev/null || \
-        iota client new-env --alias testnet --rpc https://api.testnet.iota.cafe:443
-    iota client switch --env testnet
-else
-    echo "ERROR: Unknown network '$NETWORK'. Use 'testnet' or 'mainnet'."
-    exit 1
-fi
+case "$NETWORK" in
+    mainnet) RPC="https://api.mainnet.iota.cafe:443" ;;
+    testnet) RPC="https://api.testnet.iota.cafe:443" ;;
+    localnet)   RPC="http://127.0.0.1:9000" ;;
+    *)
+        echo "ERROR: Unknown network '$NETWORK'"
+        exit 1
+        ;;
+esac
 
 ACTIVE_ADDRESS=$(iota client active-address)
-echo "Deploying from address: $ACTIVE_ADDRESS"
-echo ""
 
-# ── Build ─────────────────────────────────────────────────────────────────────
+############################################
+# Configure IOTA client
+############################################
 
-echo "► Building securitization package..."
-cd "$PROJECT_ROOT/packages/securitization"
-iota move build --silence-warnings
-echo "  Build successful."
-echo ""
+echo "Using network: $NETWORK"
+echo "Active address: $ACTIVE_ADDRESS"
 
-# ── Publish ───────────────────────────────────────────────────────────────────
+iota client switch --env "$NETWORK" >/dev/null 2>&1 || \
+iota client new-env --alias "$NETWORK" --rpc "$RPC"
 
-echo "► Publishing securitization package to $NETWORK..."
-PUBLISH_OUTPUT=$(iota client publish \
-    --gas-budget 200000000 \
-    --json \
-    2>&1)
+iota client switch --env "$NETWORK"
+iota client faucet
 
-echo "$PUBLISH_OUTPUT" | jq '.' > /tmp/publish_raw.json 2>/dev/null || {
-    echo "ERROR: Publish failed. Output:"
+############################################
+# Publish package
+############################################
+
+echo
+echo "Publishing package:"
+echo "  Path:    $PACKAGE_PATH"
+echo "  Network: $NETWORK"
+echo
+
+PUBLISH_OUTPUT=$(iota client publish "$PACKAGE_PATH" --json 2>&1)
+
+############################################
+# Extract JSON safely
+############################################
+
+JSON_OUTPUT=$(echo "$PUBLISH_OUTPUT" | awk 'BEGIN{json=0} /^\{/ {json=1} json')
+
+if ! echo "$JSON_OUTPUT" | jq empty >/dev/null 2>&1; then
+    echo "ERROR: Could not extract valid JSON from publish output"
+    echo
     echo "$PUBLISH_OUTPUT"
     exit 1
-}
+fi
 
-# Extract package ID and object IDs from publish output
-PACKAGE_ID=$(echo "$PUBLISH_OUTPUT" | jq -r '.objectChanges[] | select(.type == "published") | .packageId')
-echo "  Package ID: $PACKAGE_ID"
+echo "$JSON_OUTPUT" > "$RAW_OUTPUT_FILE"
 
-# Extract shared objects (PoolState, TrancheRegistry, etc.)
-POOL_STATE_ID=$(echo "$PUBLISH_OUTPUT" | jq -r \
-    '.objectChanges[] | select(.objectType? | contains("pool_contract::PoolState")) | .objectId')
-TRANCHE_REG_ID=$(echo "$PUBLISH_OUTPUT" | jq -r \
-    '.objectChanges[] | select(.objectType? | contains("tranche_factory::TrancheRegistry")) | .objectId')
-ISSUANCE_STATE_ID=$(echo "$PUBLISH_OUTPUT" | jq -r \
-    '.objectChanges[] | select(.objectType? | contains("issuance_contract::IssuanceState")) | .objectId' 2>/dev/null || echo "")
-WATERFALL_STATE_ID=$(echo "$PUBLISH_OUTPUT" | jq -r \
-    '.objectChanges[] | select(.objectType? | contains("waterfall_engine::WaterfallState")) | .objectId')
-COMPLIANCE_REG_ID=$(echo "$PUBLISH_OUTPUT" | jq -r \
-    '.objectChanges[] | select(.objectType? | contains("compliance_registry::ComplianceRegistry")) | .objectId')
+############################################
+# Parse deployment info
+############################################
 
-# Extract capability objects
-ADMIN_CAP_ID=$(echo "$PUBLISH_OUTPUT" | jq -r \
-    '.objectChanges[] | select(.objectType? | contains("pool_contract::AdminCap")) | .objectId')
+TX_DIGEST=$(jq -r '.digest // empty' <<< "$JSON_OUTPUT")
 
-echo ""
-echo "── Deployed Objects ──────────────────────────────────"
-echo "  PoolState:           $POOL_STATE_ID"
-echo "  TrancheRegistry:     $TRANCHE_REG_ID"
-echo "  WaterfallState:      $WATERFALL_STATE_ID"
-echo "  ComplianceRegistry:  $COMPLIANCE_REG_ID"
-echo "  AdminCap:            $ADMIN_CAP_ID"
-echo ""
+PACKAGE_ID=$(jq -r '
+    .objectChanges[]
+    | select(.type=="published")
+    | .packageId
+' <<< "$JSON_OUTPUT")
 
-# ── Save deployment manifest ──────────────────────────────────────────────────
+CREATED_OBJECTS=$(jq -r '
+    .objectChanges[]
+    | select(.type=="created")
+    | "\(.objectId)  (\(.objectType | split("::")[-1]))"
+' <<< "$JSON_OUTPUT")
 
-cat > "$DEPLOY_FILE" <<EOF
-{
-  "network":             "$NETWORK",
-  "deployedAt":         "$TIMESTAMP",
-  "deployedBy":         "$ACTIVE_ADDRESS",
-  "packageId":          "$PACKAGE_ID",
-  "sharedObjects": {
-    "PoolState":          "$POOL_STATE_ID",
-    "TrancheRegistry":    "$TRANCHE_REG_ID",
-    "WaterfallState":     "$WATERFALL_STATE_ID",
-    "ComplianceRegistry": "$COMPLIANCE_REG_ID"
-  },
-  "capabilityObjects": {
-    "AdminCap":           "$ADMIN_CAP_ID"
-  }
-}
-EOF
+UPDATED_OBJECTS=$(jq -r '
+    .objectChanges[]
+    | select(.type=="mutated")
+    | "\(.objectId)  (\(.objectType | split("::")[-1]))"
+' <<< "$JSON_OUTPUT")
 
-echo "✓ Deployment manifest saved to: $DEPLOY_FILE"
-echo ""
+############################################
+# Summary
+############################################
 
-# ── Post-deploy checklist ─────────────────────────────────────────────────────
+echo
+echo "======================================"
+echo "DEPLOYMENT SUCCESSFUL"
+echo "======================================"
 
-echo "╔══════════════════════════════════════════════════════╗"
-echo "║  POST-DEPLOY SETUP REQUIRED (manual PTB calls):      ║"
-echo "╟──────────────────────────────────────────────────────╢"
-echo "║  1. pool_contract::set_contracts(...)                ║"
-echo "║     Set TrancheFactory, IssuanceContract, Waterfall  ║"
-echo "║     and Oracle addresses.                            ║"
-echo "║                                                      ║"
-echo "║  2. pool_contract::initialise_pool(...)              ║"
-echo "║     Provide pool parameters and asset hash.          ║"
-echo "║                                                      ║"
-echo "║  3. tranche_factory::create_tranches(...)            ║"
-echo "║     Set supply caps and IssuanceContract address.    ║"
-echo "║                                                      ║"
-echo "║  4. payment_vault::create_vault<STABLECOIN>(...)     ║"
-echo "║     Create the vault for the chosen stablecoin type. ║"
-echo "║                                                      ║"
-echo "║  5. payment_vault::authorise_depositor(...)          ║"
-echo "║     Grant deposit rights to IssuanceContract.        ║"
-echo "║                                                      ║"
-echo "║  6. pool_contract::activate_pool(...)                ║"
-echo "║     Transition pool to Active status.                ║"
-echo "╚══════════════════════════════════════════════════════╝"
-echo ""
-echo "Deployment complete."
+printf "%-22s %s\n" "Network:" "$NETWORK"
+printf "%-22s %s\n" "Transaction Digest:" "$TX_DIGEST"
+printf "%-22s %s\n" "Package ID:" "$PACKAGE_ID"
+printf "%-22s %s\n" "Output File:" "$RAW_OUTPUT_FILE"
+
+if [[ -n "$CREATED_OBJECTS" ]]; then
+    echo
+    echo "Created Objects:"
+    echo "--------------------------------------"
+    echo "$CREATED_OBJECTS"
+fi
+
+if [[ -n "$UPDATED_OBJECTS" ]]; then
+    echo
+    echo "Updated Objects:"
+    echo "--------------------------------------"
+    echo "$UPDATED_OBJECTS"
+fi
+
+echo
+echo "Done."
