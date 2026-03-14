@@ -26,14 +26,14 @@
 /// - `did_object_id` stores the IOTA Identity DID document object ID for each
 ///   investor, enabling off-chain resolvers to verify credentials.
 #[allow(duplicate_alias)]
-module securitization::compliance_registry {
+module spv::compliance_registry {
     use iota::object::{Self, UID, ID};
     use iota::table::{Self, Table};
     use iota::transfer;
     use iota::tx_context::{Self, TxContext};
     use iota::clock::{Self, Clock};
-    use securitization::errors;
-    use securitization::events;
+    use spv::errors;
+    use spv::events;
     use std::string::{Self, String};
 
     // ─── Investor record ──────────────────────────────────────────────────────

@@ -42,8 +42,8 @@ iota client faucet
 ## 2. Deploy the Protocol
 
 ```bash
-chmod +x ./scripts/deploy.sh
-./scripts/deploy.sh [testnet|mainnet|localnet]
+chmod +x ./scripts/deploy_securitization.sh
+./scripts/deploy_securitization.sh [testnet|mainnet|localnet]
 ```
 
 The script publishes the package and writes a deployment manifest to `deployments/`.  

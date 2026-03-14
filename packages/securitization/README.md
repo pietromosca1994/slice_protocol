@@ -290,7 +290,7 @@ iota-securitization-move/
 │           └── (mock stablecoin, oracle stubs)
 │
 ├── scripts/
-│   └── deploy.sh
+│   └── deploy_securitization.sh
 │
 ├── deployments/
 │   └── testnet_<timestamp>.json
@@ -338,7 +338,7 @@ iota move test --filter test_activate_pool_success
 ## Deployment
 
 ```bash
-./scripts/deploy.sh testnet   # or mainnet
+./scripts/deploy_securitization.sh testnet   # or mainnet
 ```
 
 The script publishes the package and saves a JSON manifest to `deployments/`.

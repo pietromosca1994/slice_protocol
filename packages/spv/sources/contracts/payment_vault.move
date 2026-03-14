@@ -15,7 +15,7 @@
 /// - An `AuthorisedDepositorRecord` stored in a `Table` controls who may deposit.
 /// - The vault enforces that only registered depositors can call `deposit_funds`.
 #[allow(duplicate_alias)]
-module securitization::payment_vault {
+module spv::payment_vault {
     use iota::balance::{Self, Balance};
     use iota::coin::{Self, Coin};
     use iota::object::{Self, UID};
@@ -23,8 +23,8 @@ module securitization::payment_vault {
     use iota::transfer;
     use iota::tx_context::{Self, TxContext};
     use iota::clock::{Self, Clock};
-    use securitization::errors;
-    use securitization::events;
+    use spv::errors;
+    use spv::events;
 
     // ─── Capability ───────────────────────────────────────────────────────────
 
