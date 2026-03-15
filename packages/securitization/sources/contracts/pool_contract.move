@@ -79,6 +79,91 @@ module securitization::pool_contract {
 
     // ─── Pool creation ────────────────────────────────────────────────────────
 
+    /// Unsealed variant: creates PoolState by value without sharing or registering.
+    /// Use this to chain setup steps in a single PTB; call `activate_and_register_pool`
+    /// as the final step to share the object and register in SPVRegistry atomically.
+    public fun create_pool_unsealed(
+        _cap:             &AdminCap,
+        spv:              address,
+        pool_id:          vector<u8>,
+        originator:       address,
+        total_pool_value: u64,
+        interest_rate:    u32,
+        maturity_date:    u64,
+        asset_hash:       vector<u8>,
+        oracle_address:   address,
+        clock:            &Clock,
+        ctx:              &mut TxContext,
+    ): PoolState {
+        assert!(pool_id    != vector[],  errors::empty_asset_hash());
+        assert!(originator != @0x0,      errors::not_admin());
+        assert!(spv        != @0x0,      errors::not_admin());
+        assert!(total_pool_value > 0,    errors::zero_pool_value());
+        assert!(asset_hash != vector[],  errors::empty_asset_hash());
+        assert!(oracle_address != @0x0,  errors::not_oracle());
+        assert!(
+            maturity_date > clock::timestamp_ms(clock),
+            errors::maturity_in_past()
+        );
+
+        let uid         = object::new(ctx);
+        let pool_obj_id = object::uid_to_inner(&uid);
+        let zero_id     = object::id_from_address(@0x0);
+
+        PoolState {
+            id: uid,
+            pool_obj_id,
+            pool_id,
+            originator,
+            spv,
+            total_pool_value,
+            current_outstanding_principal: total_pool_value,
+            interest_rate,
+            maturity_date,
+            asset_hash,
+            pool_status:           STATUS_CREATED,
+            oracle_address,
+            tranche_factory:       @0x0,
+            issuance_contract:     @0x0,
+            waterfall_engine:      @0x0,
+            tranche_factory_obj:   zero_id,
+            issuance_contract_obj: zero_id,
+            waterfall_engine_obj:  zero_id,
+            payment_vault_obj:     zero_id,
+            initialised:           false,
+        }
+    }
+
+    /// Seals a PoolState: activates it, registers in SPVRegistry, and shares it.
+    /// This is the final step of the single-PTB setup flow. If any prior step
+    /// aborted, this is never reached and SPVRegistry remains untouched.
+    public fun activate_and_register_pool(
+        _cap:                      &AdminCap,
+        state:                     PoolState,
+        spv_registry:              &mut SPVRegistry,
+        securitization_package_id: address,
+        clock:                     &Clock,
+        ctx:                       &mut TxContext,
+    ) {
+        assert!(state.initialised,                   errors::not_initialised());
+        assert!(state.pool_status == STATUS_CREATED, errors::invalid_pool_status());
+        assert!(state.tranche_factory   != @0x0,     errors::contracts_not_linked());
+        assert!(state.issuance_contract != @0x0,     errors::contracts_not_linked());
+        assert!(state.waterfall_engine  != @0x0,     errors::contracts_not_linked());
+
+        // Copy fields needed after state is consumed (all have `copy` ability).
+        let pool_obj_id = state.pool_obj_id;
+        let pool_id     = state.pool_id;
+        let spv         = state.spv;
+
+        let mut state   = state;
+        state.pool_status = STATUS_ACTIVE;
+
+        spv_registry::register_pool(spv_registry, pool_obj_id, pool_id, spv, securitization_package_id, clock, ctx);
+        events::emit_pool_activated(pool_id, clock::timestamp_ms(clock));
+        transfer::share_object(state);
+    }
+
     public entry fun create_pool(
         _cap:                        &AdminCap,
         spv_registry:                &mut SPVRegistry,
@@ -134,7 +219,7 @@ module securitization::pool_contract {
             initialised:           false,
         };
 
-        spv_registry::register_pool(spv_registry, pool_obj_id, spv, securitization_package_id, clock, ctx);
+        spv_registry::register_pool(spv_registry, pool_obj_id, pool_id, spv, securitization_package_id, clock, ctx);
         transfer::share_object(state);
 
         events::emit_pool_initialised(

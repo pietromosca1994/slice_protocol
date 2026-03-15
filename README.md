@@ -81,9 +81,17 @@ each pool automatically when `POST /pools` is called.
 cd api
 npm install
 npm run dev
-# or with Docker:
-docker compose up -d
 ```
+
+Or with Docker (run from the **repository root** so the build context includes `packages/`):
+
+```bash
+docker compose -f api/docker-compose.yml up -d
+```
+
+> **Docker note:** The image needs the `iota` CLI to compile Move packages at runtime.
+> Before building, set the correct `IOTA_CLI_URL` build arg in `api/Dockerfile` to point at
+> the pre-built binary for your platform (see https://github.com/iotaledger/iota/releases).
 
 Check connectivity:
 ```bash
@@ -128,9 +136,14 @@ Response:
 {
   "poolStateId":             "0x...",
   "securitizationPackageId": "0x...",
-  "issuanceStateId":         "0x..."
+  "issuanceStateId":         "0x...",
+  "vaultId":                 "0x..."
 }
 ```
+
+Internally the call runs two transactions: one to deploy a fresh securitization package and one
+atomic PTB that creates, wires, and activates all pool contracts. If any step in the PTB fails
+the entire setup rolls back and `SPVRegistry` is left untouched.
 
 Each pool gets its own `securitizationPackageId`. Create multiple pools by repeating the call —
 each is fully self-contained.

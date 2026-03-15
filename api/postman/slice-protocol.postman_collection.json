@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Slice Protocol API",
-    "description": "REST API for the Slice Protocol on-chain securitization engine (IOTA). Import this collection into Postman and set the base_url variable to your running API instance.",
+    "description": "REST API for the Slice Protocol on-chain securitization engine (IOTA). Import this collection into Postman and set the base_url variable to your running API instance.\n\n**Pool creation flow (POST /pools):** Executes 2 on-chain transactions — a deploy tx and a single atomic setup PTB. All setup steps (PoolState, IssuanceState, VaultBalance creation, contract wiring, waterfall initialisation, activation, SPVRegistry registration) happen in one PTB; any failure rolls back entirely with no orphaned state.\n\n**After POST /pools:** Copy poolStateId → pool_obj_id variable, vaultId → vault_id variable.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -19,7 +19,7 @@
     {
       "key": "vault_id",
       "value": "0x...",
-      "description": "VaultBalance object ID returned by POST /vault/create",
+      "description": "VaultBalance object ID — returned by POST /pools (created atomically with the pool) or standalone POST /vault/create",
       "type": "string"
     },
     {
@@ -150,7 +150,7 @@
       "description": "All write endpoints require ADMIN_SECRET_KEY to be set. Most return HTTP 202 with a transaction digest.",
       "item": [
         {
-          "name": "POST /pools — Create pool (one-shot)",
+          "name": "POST /pools — Create pool (atomic)",
           "request": {
             "method": "POST",
             "url": "{{base_url}}/pools",
@@ -169,14 +169,14 @@
                 }
               }
             },
-            "description": "One-shot pool creation. Deploys a fresh securitization package, creates the PoolState, links all contracts, initialises the waterfall, and activates the pool. Returns poolStateId, securitizationPackageId, and issuanceStateId.\n\n- paymentFrequency: 0 = Monthly, 1 = Quarterly\n- interestRate: basis points (500 = 5%)\n- seniorRateBps/mezzRateBps/juniorRateBps: per-tranche interest rates in bps\n- seniorFaceValue/mezzFaceValue/juniorFaceValue: principal outstanding per tranche in stablecoin base units (used directly by waterfall)\n- seniorSupplyCap/mezzSupplyCap/juniorSupplyCap: max tokens per tranche; token price is derived as faceValue / supplyCap\n- assetHash: 64 hex chars (SHA-256 of off-chain legal docs)\n- coinType: stablecoin type for IssuanceState (e.g. '0x2::iota::IOTA')"
+            "description": "Atomic pool creation — executes exactly 2 on-chain transactions:\n\n**Tx 1 — Deploy:** Publishes a fresh securitization package and bootstraps the tranche treasury caps.\n\n**Tx 2 — Setup PTB (single atomic transaction):** Creates PoolState, IssuanceState, and VaultBalance by value, wires all contract IDs together, initialises the waterfall, activates the pool, and registers in SPVRegistry — all in one PTB. If any step aborts the entire PTB rolls back: SPVRegistry is never touched and no orphaned objects are left on chain.\n\nReturns `poolStateId`, `securitizationPackageId`, `issuanceStateId`, and `vaultId`. Use these to populate the Postman collection variables.\n\n**Field notes:**\n- `paymentFrequency`: 0 = Monthly, 1 = Quarterly\n- `interestRate`: pool-level interest in basis points (500 = 5%)\n- `seniorRateBps` / `mezzRateBps` / `juniorRateBps`: per-tranche waterfall rates in bps\n- `seniorFaceValue` / `mezzFaceValue` / `juniorFaceValue`: outstanding principal per tranche in stablecoin base units; used directly by the waterfall\n- `seniorSupplyCap` / `mezzSupplyCap` / `juniorSupplyCap`: max tranche tokens; price per token = faceValue / supplyCap\n- `assetHash`: 64 hex chars (SHA-256 of off-chain legal docs, no 0x prefix)\n- `coinType`: Move coin type for IssuanceState and VaultBalance (e.g. `0x2::iota::IOTA`)"
           },
           "response": [
             {
               "name": "201 Created",
               "status": "Created",
               "code": 201,
-              "body": "{\n  \"poolStateId\": \"0x...\",\n  \"securitizationPackageId\": \"0x...\",\n  \"issuanceStateId\": \"0x...\"\n}"
+              "body": "{\n  \"poolStateId\": \"0x...\",\n  \"securitizationPackageId\": \"0x...\",\n  \"issuanceStateId\": \"0x...\",\n  \"vaultId\": \"0x...\"\n}"
             }
           ]
         },
@@ -577,7 +577,7 @@
                 }
               }
             },
-            "description": "Create and share a new VaultBalance<C> for a given stablecoin type. Requires ADMIN_SECRET_KEY."
+            "description": "Create and share a standalone VaultBalance<C> for a given stablecoin type. Requires ADMIN_SECRET_KEY.\n\nNote: when creating a pool via POST /pools, a VaultBalance is created automatically as part of the atomic setup PTB — this endpoint is only needed for standalone vault creation outside of the pool flow."
           },
           "response": [
             {

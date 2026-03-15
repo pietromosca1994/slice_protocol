@@ -4,8 +4,9 @@ REST API for the Slice Protocol on-chain securitization engine (IOTA). Exposes r
 operations for all on-chain contracts via HTTP. The API discovers all pool and contract data by
 traversing the on-chain `SPVRegistry` object — only two env vars are required to get started.
 
-Each pool gets its own freshly-deployed securitization package. `POST /pools` is a single
-one-shot call that deploys the package, creates the pool, wires all contracts, and activates it.
+Each pool gets its own freshly-deployed securitization package. `POST /pools` runs two
+transactions: one package deploy and one atomic PTB that creates, wires, and activates all
+contracts. If the PTB aborts for any reason the `SPVRegistry` is left untouched.
 
 ---
 
@@ -21,6 +22,7 @@ one-shot call that deploys the package, creates the pool, wires all contracts, a
 | `LOG_LEVEL` | No | `fatal`/`error`/`warn`/`info`/`debug`/`trace` (default `info`) |
 | `GAS_BUDGET` | No | Gas budget per transaction in MIST (default `100000000`) |
 | `IOTA_RPC_URL` | No | Override RPC URL (defaults to network standard) |
+| `PACKAGES_PATH` | No | Absolute path to the repo's `packages/` directory. Auto-detected locally; set to `/app/packages` in Docker (done automatically by the Dockerfile). |
 
 The API derives all per-pool addresses (TrancheRegistry, IssuanceState, WaterfallState,
 securitization package ID) from the `PoolState` objects indexed in `SPVRegistry`.
@@ -30,16 +32,27 @@ No per-pool configuration is required.
 
 ## Running with Docker
 
-```bash
-# 1. Copy and fill in env
-cp .env.example .env
+The Docker build context must be the **repository root** (not `api/`) because the image
+copies the `packages/` directory to compile Move contracts at runtime.
 
-# 2. Build and start
-docker compose up -d
+```bash
+# Run from the repository root
+cd ..
+
+# 1. Copy and fill in env
+cp api/.env.example api/.env
+
+# 2. Build and start (IOTA_CLI_URL build arg must point at the correct binary for your platform)
+#    See https://github.com/iotaledger/iota/releases for available downloads.
+docker compose -f api/docker-compose.yml up -d
 
 # 3. Check health
 curl http://localhost:3000/health
 ```
+
+> The Dockerfile installs the `iota` CLI via `IOTA_CLI_URL`. Update the default ARG in
+> `api/Dockerfile` (or pass `--build-arg IOTA_CLI_URL=...`) to match the release binary for
+> your platform and iota version.
 
 ## Running locally
 
@@ -114,10 +127,11 @@ Write endpoints return `{ "digest": "..." }` with HTTP 202 (except `POST /pools`
 HTTP 201 with full result). The transaction is submitted immediately; use the digest to confirm
 finality on-chain.
 
-#### `POST /pools` — one-shot pool creation
+#### `POST /pools` — atomic pool creation
 
-Deploys a fresh securitization package per pool and completes the full setup sequence in one
-call. Returns immediately with all relevant object IDs.
+Deploys a fresh securitization package per pool (tx 1), then atomically creates, wires, and
+activates all contracts in a single PTB (tx 2). If the PTB aborts, `SPVRegistry` is untouched.
+Returns all relevant object IDs on success.
 
 ```json
 {
@@ -157,7 +171,8 @@ Response (HTTP 201):
 {
   "poolStateId":             "0x...",
   "securitizationPackageId": "0x...",
-  "issuanceStateId":         "0x..."
+  "issuanceStateId":         "0x...",
+  "vaultId":                 "0x..."
 }
 ```
 
@@ -314,7 +329,8 @@ Returns vault balance and accounting totals (all values as strings to preserve p
 
 ```
 POST /pools
-  │  (deploys securitization package, creates pool, wires contracts, activates)
+  │  tx 1: deploy securitization package
+  │  tx 2: atomic PTB — create pool + issuance + vault, wire contracts, activate
   ▼
 pool is Active — securitizationPackageId stored in SPVRegistry per pool
 

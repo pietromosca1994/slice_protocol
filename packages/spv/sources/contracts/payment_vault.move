@@ -18,7 +18,7 @@
 module spv::payment_vault {
     use iota::balance::{Self, Balance};
     use iota::coin::{Self, Coin};
-    use iota::object::{Self, UID};
+    use iota::object::{Self, UID, ID};
     use iota::table::{Self, Table};
     use iota::transfer;
     use iota::tx_context::{Self, TxContext};
@@ -60,6 +60,30 @@ module spv::payment_vault {
             total_distributed:     0,
             authorised_depositors: table::new(ctx),
         };
+        transfer::share_object(vault);
+    }
+
+    /// Unsealed variant: returns VaultBalance by value without sharing.
+    /// Use in a single-PTB setup flow; call `share_vault` as the last step.
+    public fun create_vault_unsealed<C>(
+        _cap: &VaultAdminCap,
+        ctx:  &mut TxContext,
+    ): VaultBalance<C> {
+        VaultBalance<C> {
+            id:                    object::new(ctx),
+            balance:               balance::zero<C>(),
+            total_deposited:       0,
+            total_distributed:     0,
+            authorised_depositors: table::new(ctx),
+        }
+    }
+
+    /// Returns the object ID of a VaultBalance (its own UID).
+    /// Used in PTB to get the ID before sharing, so it can be wired into PoolState.
+    public fun object_id<C>(v: &VaultBalance<C>): ID { object::uid_to_inner(&v.id) }
+
+    /// Shares an unsealed VaultBalance. Call after all PTB wiring is complete.
+    public fun share_vault<C>(vault: VaultBalance<C>) {
         transfer::share_object(vault);
     }
 

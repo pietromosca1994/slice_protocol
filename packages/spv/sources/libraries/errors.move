@@ -39,6 +39,8 @@ module spv::errors {
     const EPoolAlreadyRegistered: u64      = 7000;
     /// Pool object ID is not present in the SPVRegistry
     const EPoolNotRegistered: u64          = 7001;
+    /// Pool string ID (pool_id) has already been used by a prior pool
+    const EPoolIdAlreadyExists: u64        = 7002;
 
     // ── Public accessors ──────────────────────────────────────────────────────
     public fun investor_not_whitelisted(): u64    { EInvestorNotWhitelisted }
@@ -59,4 +61,5 @@ module spv::errors {
 
     public fun pool_already_registered(): u64     { EPoolAlreadyRegistered }
     public fun pool_not_registered(): u64         { EPoolNotRegistered }
+    public fun pool_id_already_exists(): u64      { EPoolIdAlreadyExists }
 }

@@ -130,6 +130,46 @@ module securitization::issuance_contract {
         transfer::share_object(state);
     }
 
+    /// Unsealed variant: returns IssuanceState by value without sharing.
+    /// Use in a single-PTB setup flow; call `share_issuance_state` as the last step.
+    public fun create_issuance_state_unsealed<C>(
+        _cap:         &IssuanceOwnerCap,
+        pool_obj_id:  ID,
+        price_senior: u64,
+        price_mezz:   u64,
+        price_junior: u64,
+        ctx:          &mut TxContext,
+    ): IssuanceState<C> {
+        assert!(price_senior > 0, errors::zero_price_per_unit());
+        assert!(price_mezz   > 0, errors::zero_price_per_unit());
+        assert!(price_junior > 0, errors::zero_price_per_unit());
+
+        IssuanceState<C> {
+            id:                    object::new(ctx),
+            pool_obj_id,
+            price_per_unit_senior: price_senior,
+            price_per_unit_mezz:   price_mezz,
+            price_per_unit_junior: price_junior,
+            sale_start:            0,
+            sale_end:              0,
+            total_raised:          0,
+            issuance_active:       false,
+            issuance_ended:        false,
+            vault_balance:         balance::zero<C>(),
+            subscriptions:         table::new(ctx),
+            succeeded:             false,
+        }
+    }
+
+    /// Returns the object ID of an IssuanceState (its own UID, not pool_obj_id).
+    /// Used in PTB to get the ID before sharing, so it can be wired into PoolState.
+    public fun object_id<C>(s: &IssuanceState<C>): ID { object::uid_to_inner(&s.id) }
+
+    /// Shares an unsealed IssuanceState. Call after all PTB wiring is complete.
+    public fun share_issuance_state<C>(state: IssuanceState<C>) {
+        transfer::share_object(state);
+    }
+
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 
     /// Open the subscription window. Prices were fixed at `create_issuance_state`

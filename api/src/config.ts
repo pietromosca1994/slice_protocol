@@ -25,6 +25,9 @@ const ConfigSchema = z.object({
 
   GAS_BUDGET:               z.coerce.number().default(100_000_000),
   PUBLISH_GAS_BUDGET:       z.coerce.number().default(2_000_000_000),
+  // Absolute path to the repo's packages/ directory.
+  // Required when running inside Docker; defaults to auto-detection in local dev.
+  PACKAGES_PATH:            z.string().optional(),
 });
 
 const parsed = ConfigSchema.safeParse(process.env);
@@ -48,5 +51,6 @@ export const config = {
   adminSecretKey:           env.ADMIN_SECRET_KEY,
   gasBudget:                env.GAS_BUDGET,
   publishGasBudget:         env.PUBLISH_GAS_BUDGET,
+  packagesPath:             env.PACKAGES_PATH,
   readOnly:                 !env.ADMIN_SECRET_KEY,
 } as const;

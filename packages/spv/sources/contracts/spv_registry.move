@@ -49,26 +49,30 @@ module spv::spv_registry {
     // ─── Shared registry ──────────────────────────────────────────────────────
 
     public struct SPVRegistry has key {
-        id:          UID,
+        id:             UID,
         /// All pool object IDs in insertion order — the canonical enumeration list.
-        pool_ids:    vector<ID>,
+        pool_ids:       vector<ID>,
         /// Per-pool metadata keyed by pool object ID.
-        pool_index:  Table<ID, PoolEntry>,
+        pool_index:     Table<ID, PoolEntry>,
         /// Per-SPV pool list keyed by SPV address.
-        spv_pools:   Table<address, vector<ID>>,
+        spv_pools:      Table<address, vector<ID>>,
         /// Total number of pools ever registered (never decrements).
-        pool_count:  u64,
+        pool_count:     u64,
+        /// Uniqueness guard: maps pool string ID (vector<u8>) → true.
+        /// Prevents two pools with the same business pool_id from being registered.
+        pool_id_index:  Table<vector<u8>, bool>,
     }
 
     // ─── Init ─────────────────────────────────────────────────────────────────
 
     fun init(ctx: &mut TxContext) {
         let registry = SPVRegistry {
-            id:         object::new(ctx),
-            pool_ids:   vector[],
-            pool_index: table::new(ctx),
-            spv_pools:  table::new(ctx),
-            pool_count: 0,
+            id:            object::new(ctx),
+            pool_ids:      vector[],
+            pool_index:    table::new(ctx),
+            spv_pools:     table::new(ctx),
+            pool_count:    0,
+            pool_id_index: table::new(ctx),
         };
         transfer::share_object(registry);
 
@@ -84,11 +88,13 @@ module spv::spv_registry {
     ///
     /// # Parameters
     /// - `pool_obj_id`                Object ID of the freshly shared `PoolState`
+    /// - `pool_id`                    Business pool identifier (must be globally unique)
     /// - `spv`                        Address of the SPV that owns this pool
     /// - `securitization_package_id`  Address of the per-pool securitization package
     public fun register_pool(
         registry:                    &mut SPVRegistry,
         pool_obj_id:                 ID,
+        pool_id:                     vector<u8>,
         spv:                         address,
         securitization_package_id:   address,
         clock:                       &Clock,
@@ -97,6 +103,10 @@ module spv::spv_registry {
         assert!(
             !table::contains(&registry.pool_index, pool_obj_id),
             errors::pool_already_registered()
+        );
+        assert!(
+            !table::contains(&registry.pool_id_index, pool_id),
+            errors::pool_id_already_exists()
         );
 
         let entry = PoolEntry {
@@ -109,6 +119,7 @@ module spv::spv_registry {
 
         vector::push_back(&mut registry.pool_ids, pool_obj_id);
         table::add(&mut registry.pool_index, pool_obj_id, entry);
+        table::add(&mut registry.pool_id_index, pool_id, true);
 
         // Initialise the per-SPV list lazily
         if (!table::contains(&registry.spv_pools, spv)) {
@@ -181,6 +192,11 @@ module spv::spv_registry {
         table::contains(&registry.pool_index, pool_obj_id)
     }
 
+    /// Returns true if `pool_id` (the business string identifier) has already been used.
+    public fun pool_id_taken(registry: &SPVRegistry, pool_id: vector<u8>): bool {
+        table::contains(&registry.pool_id_index, pool_id)
+    }
+
     /// Fetch the full `PoolEntry` record for a pool.
     public fun get_pool_entry(registry: &SPVRegistry, pool_obj_id: ID): &PoolEntry {
         assert!(
@@ -201,7 +217,12 @@ module spv::spv_registry {
     // ─── Test-only helpers ────────────────────────────────────────────────────
 
     #[test_only]
-    public fun init_for_testing(ctx: &mut TxContext) {
-        init(ctx);
+    public fun init_for_testing(ctx: &mut TxContext) { init(ctx); }
+
+    /// Test-only helper: expose pool_id_index membership check without going
+    /// through the public accessor (useful to assert index state directly).
+    #[test_only]
+    public fun pool_id_taken_for_testing(registry: &SPVRegistry, pool_id: vector<u8>): bool {
+        pool_id_taken(registry, pool_id)
     }
 }

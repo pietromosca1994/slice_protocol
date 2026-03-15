@@ -126,11 +126,6 @@ export interface PoolSummary {
   maturityDate:             Date;
   initialised:              boolean;
   securitizationPackageId:  string;
-  contractAddresses: {
-    trancheFactory:   string;
-    issuanceContract: string;
-    waterfallEngine:  string;
-  };
   contractObjects: ContractObjects;
 }
 
@@ -318,11 +313,6 @@ export class RegistryService {
       maturityDate:            new Date(Number(raw.maturity_date)),
       initialised:             raw.initialised,
       securitizationPackageId,
-      contractAddresses: {
-        trancheFactory:   raw.tranche_factory,
-        issuanceContract: raw.issuance_contract,
-        waterfallEngine:  raw.waterfall_engine,
-      },
       contractObjects: {
         trancheFactoryObj:   isZeroId(raw.tranche_factory_obj)   ? null : raw.tranche_factory_obj,
         issuanceContractObj: isZeroId(raw.issuance_contract_obj) ? null : raw.issuance_contract_obj,
