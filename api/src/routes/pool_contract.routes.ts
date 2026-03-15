@@ -5,6 +5,7 @@ import { registryService } from "../services/contracts/registry.service";
 import * as poolService from "../services/contracts/pool.service";
 import { deploySecuritizationPackage, setupPool } from "../services/contracts/deploy.service";
 import { getKeypair } from "../services/iota-client";
+import { ApiError } from "../utils/errors";
 
 export const poolContractRouter = Router();
 poolContractRouter.use(requireWriteAccess);
@@ -64,9 +65,14 @@ poolContractRouter.post("/", async (req: Request, res: Response, next: NextFunct
 // ── Pool lifecycle ─────────────────────────────────────────────────────────────
 
 // POST /pools/:poolObjId/activate
+// Note: pools created via POST /pools are born Active. This endpoint is for pools
+// that were left in Created state via a direct create_pool call.
 poolContractRouter.post("/:poolObjId/activate", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const pool   = await registryService.getPool(req.params.poolObjId);
+    const pool = await registryService.getPool(req.params.poolObjId);
+    if (pool.status !== "Created") {
+      throw ApiError.conflict(`Pool is already ${pool.status} — cannot activate`);
+    }
     const digest = await poolService.activatePool(req.params.poolObjId, pool.securitizationPackageId);
     res.status(202).json({ digest });
   } catch (e) { next(e); }

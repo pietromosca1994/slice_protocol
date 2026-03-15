@@ -279,11 +279,17 @@ export interface StartIssuanceParams {
 
 export async function startIssuance(params: StartIssuanceParams): Promise<string> {
   requireSigner();
+
+  const { objectType } = await fetchObjectWithType(params.issuanceStateId);
+  const coinTypeMatch  = objectType.match(/<(.+)>$/);
+  if (!coinTypeMatch) throw ApiError.internal(`Could not extract coin type from IssuanceState type: ${objectType}`);
+  const coinType = coinTypeMatch[1];
+
   const txb = new Transaction();
 
   txb.moveCall({
     target: `${params.securitizationPackageId}::issuance_contract::start_issuance`,
-    typeArguments: [],
+    typeArguments: [coinType],
     arguments: [
       txb.object(await _resolveIssuanceOwnerCap(params.securitizationPackageId)),
       txb.object(params.issuanceStateId),
@@ -303,11 +309,17 @@ export async function endIssuance(
   securitizationPackageId: string,
 ): Promise<string> {
   requireSigner();
+
+  const { objectType } = await fetchObjectWithType(issuanceStateId);
+  const coinTypeMatch  = objectType.match(/<(.+)>$/);
+  if (!coinTypeMatch) throw ApiError.internal(`Could not extract coin type from IssuanceState type: ${objectType}`);
+  const coinType = coinTypeMatch[1];
+
   const txb = new Transaction();
 
   txb.moveCall({
     target: `${securitizationPackageId}::issuance_contract::end_issuance`,
-    typeArguments: [],
+    typeArguments: [coinType],
     arguments: [
       txb.object(await _resolveIssuanceOwnerCap(securitizationPackageId)),
       txb.object(issuanceStateId),

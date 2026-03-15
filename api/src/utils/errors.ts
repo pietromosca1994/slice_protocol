@@ -12,4 +12,5 @@ export class ApiError extends Error {
   static notFound(msg: string)                      { return new ApiError(404, msg); }
   static readOnly()                                 { return new ApiError(403, "API is running in read-only mode (no ADMIN_SECRET_KEY provided)"); }
   static internal(msg: string, details?: unknown)   { return new ApiError(500, msg, details); }
+  static conflict(msg: string)                      { return new ApiError(409, msg); }
 }

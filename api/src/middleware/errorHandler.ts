@@ -26,5 +26,7 @@ export function errorHandler(
   }
 
   logger.error({ err }, "Unhandled error");
-  res.status(500).json({ error: "Internal server error" });
+  // Surface Move transaction errors and other runtime errors with their actual message.
+  const message = err instanceof Error ? err.message : "Internal server error";
+  res.status(500).json({ error: message });
 }

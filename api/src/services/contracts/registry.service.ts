@@ -18,7 +18,7 @@ interface RawSPVRegistry {
 
 interface RawPoolState {
   pool_obj_id:                   string;
-  pool_id:                       string;
+  pool_id:                       string | number[];
   originator:                    string;
   spv:                           string;
   total_pool_value:              string;
@@ -102,9 +102,12 @@ function isZeroId(id: string): boolean {
   return !id || id === ZERO_ID || id === "0x0";
 }
 
-function hex2utf8(hex: string): string {
-  try { return Buffer.from(hex.replace(/^0x/, ""), "hex").toString("utf8"); }
-  catch { return hex; }
+// vector<u8> comes back from the IOTA RPC as either a number[] or a hex string.
+function bytesToUtf8(raw: string | number[]): string {
+  try {
+    if (Array.isArray(raw)) return Buffer.from(raw).toString("utf8");
+    return Buffer.from((raw as string).replace(/^0x/, ""), "hex").toString("utf8");
+  } catch { return String(raw); }
 }
 
 export interface ContractObjects {
@@ -303,7 +306,7 @@ export class RegistryService {
   private _normalisePool(raw: RawPoolState, securitizationPackageId: string): PoolSummary {
     return {
       poolObjId:               raw.pool_obj_id,
-      poolId:                  hex2utf8(raw.pool_id),
+      poolId:                  bytesToUtf8(raw.pool_id),
       spv:                     raw.spv,
       originator:              raw.originator,
       status:                  POOL_STATUS[raw.pool_status] ?? "Created",
