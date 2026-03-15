@@ -7,13 +7,20 @@ import pinoHttp from "pino-http";
 import { config } from "./config";
 import { logger } from "./utils/logger";
 import { errorHandler } from "./middleware/errorHandler";
-import { healthRouter }     from "./routes/health.routes";
-import { registryRouter }   from "./routes/registry.routes";
-import { poolRouter }       from "./routes/pool.routes";
-import { complianceRouter } from "./routes/compliance.routes";
-import { vaultRouter }      from "./routes/vault.routes";
+import { healthRouter }              from "./routes/health.routes";
+import { spvRegistryRouter }         from "./routes/spv_registry.routes";
+import { poolContractRouter }        from "./routes/pool_contract.routes";
+import { issuanceContractRouter }    from "./routes/issuance_contract.routes";
+import { waterfallEngineRouter }     from "./routes/waterfall_engine.routes";
+import { complianceRegistryRouter }  from "./routes/compliance_registry.routes";
+import { paymentVaultRouter }        from "./routes/payment_vault.routes";
 
 const app = express();
+
+// Serialize BigInt values (returned by the IOTA SDK) as strings
+app.set("json replacer", (_key: string, value: unknown) =>
+  typeof value === "bigint" ? value.toString() : value,
+);
 
 // ── Global middleware ──────────────────────────────────────────────────────────
 app.use(helmet());
@@ -24,10 +31,12 @@ app.use(rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHea
 
 // ── Routes ─────────────────────────────────────────────────────────────────────
 app.use("/health",     healthRouter);
-app.use("/registry",   registryRouter);
-app.use("/pools",      poolRouter);
-app.use("/compliance", complianceRouter);
-app.use("/vault",      vaultRouter);
+app.use("/registry",   spvRegistryRouter);
+app.use("/pools",      poolContractRouter);
+app.use("/pools",      issuanceContractRouter);
+app.use("/pools",      waterfallEngineRouter);
+app.use("/compliance", complianceRegistryRouter);
+app.use("/vault",      paymentVaultRouter);
 
 // ── 404 ────────────────────────────────────────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ error: "Not found" }));

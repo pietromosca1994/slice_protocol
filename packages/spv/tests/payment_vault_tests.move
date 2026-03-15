@@ -9,18 +9,16 @@
 ///  - Zero-amount deposit and release aborts
 ///  - Duplicate authorisation abort
 #[test_only, allow(unused_use, unused_variable, unused_const, duplicate_alias, unused_function)]
-module securitization::payment_vault_tests {
+module spv::payment_vault_tests {
     use iota::test_scenario::{Self as ts};
     use iota::clock::{Self, Clock};
     use iota::coin::{Self};
     use iota::iota::IOTA; // Using IOTA coin as stand-in for stablecoin in tests
-    use securitization::payment_vault::{
+    use iota::balance;
+    use spv::payment_vault::{
         Self, VaultBalance, VaultAdminCap,
     };
-    use securitization::errors;
-    use securitization::compliance_registry::{
-        Self, ComplianceRegistry, ComplianceAdminCap,
-    };
+    use spv::errors;
 
     // ─── Addresses ────────────────────────────────────────────────────────────
     const ADMIN:     address = @0xE0;
@@ -112,7 +110,7 @@ module securitization::payment_vault_tests {
     }
 
     #[test]
-    #[expected_failure(abort_code = securitization::errors::EDepositorAlreadyAuthorised, location = securitization::payment_vault)]
+    #[expected_failure(abort_code = spv::errors::EDepositorAlreadyAuthorised, location = spv::payment_vault)]
     fun test_authorise_duplicate_aborts() {
         let mut scenario = ts::begin(ADMIN);
         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
@@ -157,7 +155,7 @@ module securitization::payment_vault_tests {
     }
 
     #[test]
-    #[expected_failure(abort_code = securitization::errors::ENotAuthorisedDepositor, location = securitization::payment_vault)]
+    #[expected_failure(abort_code = spv::errors::ENotAuthorisedDepositor, location = spv::payment_vault)]
     fun test_deposit_by_stranger_aborts() {
         let mut scenario = ts::begin(ADMIN);
         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
@@ -228,7 +226,7 @@ module securitization::payment_vault_tests {
     }
 
     #[test]
-    #[expected_failure(abort_code = securitization::errors::EInsufficientVaultBalance, location = securitization::payment_vault)]
+    #[expected_failure(abort_code = spv::errors::EInsufficientVaultBalance, location = spv::payment_vault)]
     fun test_release_more_than_balance_aborts() {
         let mut scenario = ts::begin(ADMIN);
         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
@@ -262,7 +260,7 @@ module securitization::payment_vault_tests {
     }
 
     #[test]
-    #[expected_failure(abort_code = securitization::errors::EZeroReleaseAmount, location = securitization::payment_vault)]
+    #[expected_failure(abort_code = spv::errors::EZeroReleaseAmount, location = spv::payment_vault)]
     fun test_release_zero_aborts() {
         let mut scenario = ts::begin(ADMIN);
         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
@@ -331,6 +329,34 @@ module securitization::payment_vault_tests {
             assert!(payment_vault::vault_balance(&vault)      == 1_200_000, 0);
             assert!(payment_vault::total_deposited(&vault)    == 1_500_000, 1);
             assert!(payment_vault::total_distributed(&vault)  ==   300_000, 2);
+            ts::return_shared(vault);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  6. receive_balance (used by issuance_contract::release_funds_to_vault)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    /// receive_balance joins a raw Balance<C> directly into the vault —
+    /// no depositor authorisation required (called by trusted Move code).
+    fun test_receive_balance_success() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        setup(&mut scenario);
+        ts::next_tx(&mut scenario, ADMIN);
+        setup_vault(&mut scenario);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let mut vault  = ts::take_shared<VaultBalance<IOTA>>(&scenario);
+            let raw_coin   = coin::mint_for_testing<IOTA>(750_000, ts::ctx(&mut scenario));
+            let raw_balance = coin::into_balance(raw_coin);
+            payment_vault::receive_balance(&mut vault, raw_balance, &clock);
+            assert!(payment_vault::vault_balance(&vault) == 750_000, 0);
             ts::return_shared(vault);
         };
 

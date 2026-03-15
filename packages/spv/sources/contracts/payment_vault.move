@@ -161,6 +161,25 @@ module spv::payment_vault {
         events::emit_funds_released(recipient, amount, new_balance, clock::timestamp_ms(clock));
     }
 
+    /// Accept a `Balance<C>` transferred directly from another Move module
+    /// (e.g. `issuance_contract::release_funds_to_vault`).
+    ///
+    /// This is `public` but NOT `entry` — only Move code that already holds a
+    /// `Balance<C>` (extracted from an owned `IssuanceState`) can call it.
+    /// No depositor authorisation check is needed: physical possession of the
+    /// `Balance` value is proof of authority.
+    public fun receive_balance<C>(
+        vault: &mut VaultBalance<C>,
+        funds: Balance<C>,
+        clock: &Clock,
+    ) {
+        let amount      = balance::value(&funds);
+        balance::join(&mut vault.balance, funds);
+        vault.total_deposited = vault.total_deposited + amount;
+        let new_balance = balance::value(&vault.balance);
+        events::emit_funds_deposited(@0x0, amount, new_balance, clock::timestamp_ms(clock));
+    }
+
     // ─── Read-only accessors ──────────────────────────────────────────────────
 
     public fun vault_balance<C>(vault: &VaultBalance<C>): u64 {

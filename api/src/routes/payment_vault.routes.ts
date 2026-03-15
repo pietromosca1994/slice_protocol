@@ -4,10 +4,10 @@ import { requireWriteAccess } from "../middleware/readOnly";
 import { iotaClient } from "../services/iota-client";
 import { config } from "../config";
 import { signAndExecute, getKeypair } from "../services/iota-client";
-import { TransactionBlock } from "@iota/iota-sdk/transactions";
+import { Transaction } from "@iota/iota-sdk/transactions";
 import { ApiError } from "../utils/errors";
 
-export const vaultRouter = Router();
+export const paymentVaultRouter = Router();
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -49,7 +49,7 @@ async function resolveVaultAdminCap(): Promise<string> {
 
 // GET /vault/:vaultId
 // Returns current vault balance and accounting totals
-vaultRouter.get("/:vaultId", async (req: Request, res: Response, next: NextFunction) => {
+paymentVaultRouter.get("/:vaultId", async (req: Request, res: Response, next: NextFunction) => {
   try {
     const state = await fetchVaultState(req.params.vaultId);
     // Serialise BigInt as string for JSON
@@ -64,13 +64,13 @@ vaultRouter.get("/:vaultId", async (req: Request, res: Response, next: NextFunct
 
 // POST /vault/create
 // Create and share a new VaultBalance for a given stablecoin type
-vaultRouter.post(
+paymentVaultRouter.post(
   "/create",
   requireWriteAccess,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { coinType } = z.object({ coinType: z.string().min(1) }).parse(req.body);
-      const txb          = new TransactionBlock();
+      const txb          = new Transaction();
 
       txb.moveCall({
         target:        `${config.spvPackageId}::payment_vault::create_vault`,
@@ -80,7 +80,7 @@ vaultRouter.post(
         ],
       });
 
-      const digest = await signAndExecute(txb);
+      const { digest } = await signAndExecute(txb);
       res.status(202).json({ digest });
     } catch (e) { next(e); }
   },
@@ -88,7 +88,7 @@ vaultRouter.post(
 
 // POST /vault/:vaultId/authorise-depositor
 // Grant deposit rights to an address
-vaultRouter.post(
+paymentVaultRouter.post(
   "/:vaultId/authorise-depositor",
   requireWriteAccess,
   async (req: Request, res: Response, next: NextFunction) => {
@@ -98,19 +98,19 @@ vaultRouter.post(
         coinType:  z.string(),
       }).parse(req.body);
 
-      const txb = new TransactionBlock();
+      const txb = new Transaction();
       txb.moveCall({
         target:        `${config.spvPackageId}::payment_vault::authorise_depositor`,
         typeArguments: [coinType],
         arguments: [
           txb.object(await resolveVaultAdminCap()),
           txb.object(req.params.vaultId),
-          txb.pure(depositor, "address"),
+          txb.pure.address(depositor),
           txb.object("0x6"),
         ],
       });
 
-      const digest = await signAndExecute(txb);
+      const { digest } = await signAndExecute(txb);
       res.status(202).json({ digest });
     } catch (e) { next(e); }
   },
@@ -118,13 +118,13 @@ vaultRouter.post(
 
 // DELETE /vault/:vaultId/depositor/:depositor
 // Revoke deposit rights
-vaultRouter.delete(
+paymentVaultRouter.delete(
   "/:vaultId/depositor/:depositor",
   requireWriteAccess,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { coinType } = z.object({ coinType: z.string() }).parse(req.body);
-      const txb          = new TransactionBlock();
+      const txb          = new Transaction();
 
       txb.moveCall({
         target:        `${config.spvPackageId}::payment_vault::revoke_depositor`,
@@ -132,11 +132,11 @@ vaultRouter.delete(
         arguments: [
           txb.object(await resolveVaultAdminCap()),
           txb.object(req.params.vaultId),
-          txb.pure(req.params.depositor, "address"),
+          txb.pure.address(req.params.depositor),
         ],
       });
 
-      const digest = await signAndExecute(txb);
+      const { digest } = await signAndExecute(txb);
       res.status(202).json({ digest });
     } catch (e) { next(e); }
   },
@@ -144,7 +144,7 @@ vaultRouter.delete(
 
 // POST /vault/:vaultId/release
 // Release funds to a recipient (admin only)
-vaultRouter.post(
+paymentVaultRouter.post(
   "/:vaultId/release",
   requireWriteAccess,
   async (req: Request, res: Response, next: NextFunction) => {
@@ -155,20 +155,20 @@ vaultRouter.post(
         coinType:  z.string(),
       }).parse(req.body);
 
-      const txb = new TransactionBlock();
+      const txb = new Transaction();
       txb.moveCall({
         target:        `${config.spvPackageId}::payment_vault::release_funds`,
         typeArguments: [coinType],
         arguments: [
           txb.object(await resolveVaultAdminCap()),
           txb.object(req.params.vaultId),
-          txb.pure(recipient, "address"),
-          txb.pure(amount,    "u64"),
+          txb.pure.address(recipient),
+          txb.pure.u64(amount),
           txb.object("0x6"),
         ],
       });
 
-      const digest = await signAndExecute(txb);
+      const { digest } = await signAndExecute(txb);
       res.status(202).json({ digest });
     } catch (e) { next(e); }
   },

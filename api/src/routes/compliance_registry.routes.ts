@@ -5,7 +5,7 @@ import { iotaClient } from "../services/iota-client";
 import { config } from "../config";
 import * as poolService from "../services/contracts/pool.service";
 
-export const complianceRouter = Router();
+export const complianceRegistryRouter = Router();
 
 // ── Schemas ────────────────────────────────────────────────────────────────────
 
@@ -25,7 +25,7 @@ const UpdateAccreditationSchema = z.object({
 
 // GET /compliance/:registryId/investor/:address
 // Check whether an investor is whitelisted (read-only, no key required)
-complianceRouter.get(
+complianceRegistryRouter.get(
   "/:registryId/investor/:address",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -89,7 +89,7 @@ complianceRouter.get(
 
 // POST /compliance/:registryId/investors
 // Add a new investor to the whitelist
-complianceRouter.post(
+complianceRegistryRouter.post(
   "/:registryId/investors",
   requireWriteAccess,
   async (req: Request, res: Response, next: NextFunction) => {
@@ -106,7 +106,7 @@ complianceRouter.post(
 
 // DELETE /compliance/:registryId/investors/:address
 // Soft-remove (deactivate) an investor
-complianceRouter.delete(
+complianceRegistryRouter.delete(
   "/:registryId/investors/:address",
   requireWriteAccess,
   async (req: Request, res: Response, next: NextFunction) => {
@@ -122,7 +122,7 @@ complianceRouter.delete(
 
 // PATCH /compliance/:registryId/investors/:address/accreditation
 // Update accreditation level
-complianceRouter.patch(
+complianceRegistryRouter.patch(
   "/:registryId/investors/:address/accreditation",
   requireWriteAccess,
   async (req: Request, res: Response, next: NextFunction) => {
@@ -140,7 +140,7 @@ complianceRouter.patch(
 
 // GET /compliance/:registryId/transfer-check
 // Check if a transfer between two addresses is allowed
-complianceRouter.get(
+complianceRegistryRouter.get(
   "/:registryId/transfer-check",
   async (req: Request, res: Response, next: NextFunction) => {
     try {

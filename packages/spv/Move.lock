@@ -2,11 +2,10 @@
 
 [move]
 version = 3
-manifest_digest = "028289793386059BD61CBD8F4783F12BB373931C8280B9FE8A8AEE3A3E830732"
-deps_digest = "3C4103934B1E040BB6B23F1D610B4EF9F2F1166A50A104EADCF77467C004C600"
+manifest_digest = "A06BA1212C52744C6841AE1D102003193D0E58F15C7EA7CD89FD221F1AE4D8D2"
+deps_digest = "F8BBB0CCB2491CA29A3DF03D6F92277A4F3574266507ACD77214D37ECA3F3082"
 dependencies = [
   { id = "Iota", name = "Iota" },
-  { id = "spv", name = "spv" },
 ]
 
 [[move.package]]
@@ -21,10 +20,15 @@ dependencies = [
 id = "MoveStdlib"
 source = { git = "https://github.com/iotaledger/iota.git", rev = "framework/testnet", subdir = "crates/iota-framework/packages/move-stdlib" }
 
-[[move.package]]
-id = "spv"
-source = { local = "../spv" }
+[move.toolchain-version]
+compiler-version = "1.18.1-rc"
+edition = "2024.beta"
+flavor = "iota"
 
-dependencies = [
-  { id = "Iota", name = "Iota" },
-]
+[env]
+
+[env.testnet]
+chain-id = "2304aa97"
+original-published-id = "0xf3754d0620352e19fc7f668c0d42e3f47909e878602d8a2971c80bbe461c3e84"
+latest-published-id = "0xf3754d0620352e19fc7f668c0d42e3f47909e878602d8a2971c80bbe461c3e84"
+published-version = "1"

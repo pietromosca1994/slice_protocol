@@ -33,24 +33,44 @@ The Slice Protocol replicates this entire structure on the IOTA blockchain, repl
 
 ### 1. Pool Formation
 
-A lender has €10M of car loans on its balance sheet. It wants to free up capital without selling the loans outright. It creates a pool by calling `initialise_pool`:
+A lender has €10M of car loans on its balance sheet. It wants to free up capital without selling the loans outright. It creates a pool with a single API call to `POST /pools`:
 
+```json
+{
+  "totalPoolValue":    "10000000000",
+  "interestRate":      500,
+  "maturityDate":      1893456000000,
+  "assetHash":         "SHA-256 of the loan register stored off-chain",
+  "seniorSupplyCap":  "5000",
+  "mezzSupplyCap":    "3000",
+  "juniorSupplyCap":  "2000",
+  "seniorFaceValue":  "5000000000",
+  "mezzFaceValue":    "3000000000",
+  "juniorFaceValue":  "2000000000",
+  "seniorRateBps":     300,
+  "mezzRateBps":       600,
+  "juniorRateBps":     1200,
+  "paymentFrequency":  0,
+  "coinType":          "0x2::iota::IOTA"
+}
 ```
-total_pool_value  = 10,000,000,000   (base units)
-interest_rate     = 500 bps          (5% blended rate)
-maturity_date     = 3 years from now
-asset_hash        = SHA-256 of the loan register stored off-chain
-```
 
-The hash is the on-chain fingerprint of the legal documentation. Any tampering with the off-chain documents produces a different hash, making the binding between the blockchain record and the legal reality auditable and tamper-evident.
+This single call deploys a fresh securitization package on-chain for this pool, creates the
+`PoolState`, sets all contract links, initialises the waterfall, and activates the pool. Each
+pool is fully self-contained with its own on-chain package — no shared deployment state.
 
-The `originator` and `spv` addresses represent the lender and the bankruptcy-remote SPV respectively. Once `activate_pool` is called, the pool is live and its parameters are immutable.
+The `asset_hash` is the on-chain fingerprint of the legal documentation. Any tampering with the
+off-chain documents produces a different hash, making the binding between the blockchain record
+and the legal reality auditable and tamper-evident.
+
+The `originator` and `spv` addresses represent the lender and the bankruptcy-remote SPV
+respectively. Once activated, the pool is live and its parameters are immutable.
 
 ---
 
 ### 2. Tranche Structuring
 
-The SPV structures the €10M into three risk classes:
+The SPV structures the €10M into three risk classes, specified in the `POST /pools` body:
 
 ```
 Senior  (€5M,  3% interest)   lowest risk  — paid first   — AAA equivalent
@@ -58,9 +78,16 @@ Mezz    (€3M,  6% interest)   medium risk  — paid second  — BBB equivalent
 Junior  (€2M, 12% interest)   highest risk — paid last    — first-loss piece
 ```
 
-`create_tranches` sets these supply caps. Three fungible tokens are minted as needed during the subscription phase — no tokens exist yet at this point, only the authority to mint up to the cap.
+`seniorFaceValue`, `mezzFaceValue`, and `juniorFaceValue` state the principal each tranche
+represents in stablecoin base units — this becomes the waterfall outstanding directly.
+`seniorSupplyCap`, `mezzSupplyCap`, and `juniorSupplyCap` set the maximum token supply per
+tranche; token price is derived as `faceValue / supplyCap`. Three fungible tokens are minted
+as needed during the subscription phase — no tokens exist yet at this point, only the authority
+to mint up to the cap.
 
-The `IssuanceAdminCap` is transferred to the `IssuanceContract` address at this step. This is the protocol equivalent of the SPV receiving legal authority to issue notes — a Move capability object rather than a mandate in a trust deed.
+The `IssuanceAdminCap` is transferred to the `IssuanceContract` address during setup. This is
+the protocol equivalent of the SPV receiving legal authority to issue notes — a Move capability
+object rather than a mandate in a trust deed.
 
 ---
 
@@ -82,9 +109,11 @@ Before any investor can subscribe, they must be whitelisted in `ComplianceRegist
 
 ### 4. Primary Issuance — Subscription Window
 
-`start_issuance` opens the book-building phase. The window has a hard start and end timestamp; no investments are accepted outside it.
+`POST /pools/:id/issuance/start` opens the book-building phase. The window has a hard start and
+end timestamp; no investments are accepted outside it.
 
-When an investor calls `invest`:
+When `POST /pools/:id/issuance/invest` is called (or an investor calls `invest` directly
+on-chain):
 
 1. `ComplianceRegistry` is checked — is the investor whitelisted, active, and past their holding period?
 2. The stablecoin payment is held in `IssuanceState.vault_balance` — equivalent to funds held in escrow by the placement agent
@@ -97,12 +126,12 @@ When `end_issuance` is called, `release_funds_to_vault` moves all raised stablec
 
 ### 5. Ongoing Servicing — The Waterfall
 
-Every month the borrowers make repayments. The servicer reports to the protocol via two actions:
+Every month the borrowers make repayments. The servicer reports to the protocol via two API calls:
 
-- **`update_performance_data`** (via `OracleCap`) — updates outstanding principal on `PoolContract`, giving investors an auditable view of pool health
-- **`deposit_payment`** on `WaterfallEngine` — records the cash available for distribution
+- **`POST /pools/:id/waterfall/deposit`** — records the cash available for distribution
+- **`POST /pools/:id/waterfall/accrue`** — accrues simple interest since last distribution
 
-`run_waterfall` then distributes it in strict priority order. For example, with €80,000 available:
+`POST /pools/:id/waterfall/run` then distributes it in strict priority order. For example, with €80,000 available:
 
 ```
 Step 1 → Senior accrued interest    €12,500   paid in full   → remaining: €67,500
@@ -119,23 +148,29 @@ This is the legal waterfall clause from the deal prospectus, executed determinis
 
 ### 6. Stress Scenarios
 
-#### Turbo Mode
+#### Turbo Mode (`POST /pools/:id/waterfall/turbo`)
 
 Mirrors an **accelerated amortisation trigger** — a provision in many CLO and ABS deals that redirects cash to pay down Senior principal faster when the deal is outperforming. Instead of excess cash flowing to Junior, it all goes to Senior paydown, shortening duration and reducing credit risk for the most senior investors.
 
-#### Default Mode
+#### Default Mode (`POST /pools/:id/waterfall/default`)
 
 Mirrors the **enforcement waterfall** that activates when a deal breaches its performance triggers (delinquency rates, overcollateralisation tests, coverage ratios). Junior and Mezz distributions are suspended entirely. All recoveries flow exclusively to Senior — exactly as a trustee would enforce the priority of payments clause in a defaulted deal.
 
-The `PoolCap` held by the pool contract allows the oracle to trigger default mode autonomously via `mark_default_oracle`, without waiting for an admin action — equivalent to the trustee acting on the servicer's breach notice under a pre-agreed enforcement mechanism.
+`POST /pools/:id/default` transitions the pool itself to Defaulted status. The waterfall can also
+be set to Default mode independently via the waterfall route.
 
 ---
 
 ### 7. Maturity and Redemption
 
-When the oracle reports `outstanding_principal = 0` and the maturity date has passed, `PoolContract` automatically transitions to `STATUS_MATURED`. Investors burn their tokens via `melt_senior`, `melt_mezz`, or `melt_junior` — equivalent to surrendering note certificates to the paying agent upon final redemption.
+When the outstanding principal is fully repaid and the maturity date has passed, the pool can be
+closed via `POST /pools/:id/close`, transitioning it to `STATUS_MATURED`. Investors burn their
+tokens via `melt_senior`, `melt_mezz`, or `melt_junior` (called directly on-chain) — equivalent
+to surrendering note certificates to the paying agent upon final redemption.
 
-`disable_minting` permanently closes the tranche, ensuring no new tokens can be issued against a retired pool — equivalent to the trustee cancelling the note programme after final redemption and releasing the SPV.
+`disable_minting` permanently closes the tranche, ensuring no new tokens can be issued against a
+retired pool — equivalent to the trustee cancelling the note programme after final redemption and
+releasing the SPV.
 
 ---
 

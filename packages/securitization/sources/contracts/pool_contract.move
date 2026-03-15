@@ -66,6 +66,7 @@ module securitization::pool_contract {
         tranche_factory_obj:           ID,
         issuance_contract_obj:         ID,
         waterfall_engine_obj:          ID,
+        payment_vault_obj:             ID,
         initialised:                   bool,
     }
 
@@ -79,18 +80,19 @@ module securitization::pool_contract {
     // ─── Pool creation ────────────────────────────────────────────────────────
 
     public entry fun create_pool(
-        _cap:             &AdminCap,
-        spv_registry:     &mut SPVRegistry,
-        spv:              address,
-        pool_id:          vector<u8>,
-        originator:       address,
-        total_pool_value: u64,
-        interest_rate:    u32,
-        maturity_date:    u64,
-        asset_hash:       vector<u8>,
-        oracle_address:   address,
-        clock:            &Clock,
-        ctx:              &mut TxContext,
+        _cap:                        &AdminCap,
+        spv_registry:                &mut SPVRegistry,
+        spv:                         address,
+        pool_id:                     vector<u8>,
+        originator:                  address,
+        total_pool_value:            u64,
+        interest_rate:               u32,
+        maturity_date:               u64,
+        asset_hash:                  vector<u8>,
+        oracle_address:              address,
+        securitization_package_id:   address,
+        clock:                       &Clock,
+        ctx:                         &mut TxContext,
     ) {
         assert!(pool_id    != vector[],  errors::empty_asset_hash());
         assert!(originator != @0x0,      errors::not_admin());
@@ -125,13 +127,14 @@ module securitization::pool_contract {
             tranche_factory:      @0x0,
             issuance_contract:    @0x0,
             waterfall_engine:     @0x0,
-            tranche_factory_obj:  zero_id,
+            tranche_factory_obj:   zero_id,
             issuance_contract_obj: zero_id,
-            waterfall_engine_obj: zero_id,
-            initialised:          false,
+            waterfall_engine_obj:  zero_id,
+            payment_vault_obj:     zero_id,
+            initialised:           false,
         };
 
-        spv_registry::register_pool(spv_registry, pool_obj_id, spv, clock, ctx);
+        spv_registry::register_pool(spv_registry, pool_obj_id, spv, securitization_package_id, clock, ctx);
         transfer::share_object(state);
 
         events::emit_pool_initialised(
@@ -162,26 +165,29 @@ module securitization::pool_contract {
         state.oracle_address    = oracle_address;
     }
 
-    /// Set the shared object IDs of the three downstream contracts.
-    /// Called once after the three shared objects have been created and
-    /// their IDs are known. This is what the off-chain API reads to
-    /// traverse from a PoolState to its TrancheRegistry, IssuanceState,
-    /// and WaterfallState without any external configuration.
+    /// Set the shared object IDs of all four downstream contracts.
+    /// Called once after the shared objects have been created and their IDs are
+    /// known. This is what the off-chain API reads to traverse from a PoolState
+    /// to its TrancheRegistry, IssuanceState, WaterfallState, and PaymentVault
+    /// without any external configuration.
     public entry fun set_contract_objects(
         _cap:                  &AdminCap,
         state:                 &mut PoolState,
         tranche_factory_obj:   ID,
         issuance_contract_obj: ID,
         waterfall_engine_obj:  ID,
+        payment_vault_obj:     ID,
     ) {
         let zero_id = object::id_from_address(@0x0);
         assert!(tranche_factory_obj   != zero_id, errors::contracts_not_linked());
         assert!(issuance_contract_obj != zero_id, errors::contracts_not_linked());
         assert!(waterfall_engine_obj  != zero_id, errors::contracts_not_linked());
+        assert!(payment_vault_obj     != zero_id, errors::contracts_not_linked());
 
         state.tranche_factory_obj   = tranche_factory_obj;
         state.issuance_contract_obj = issuance_contract_obj;
         state.waterfall_engine_obj  = waterfall_engine_obj;
+        state.payment_vault_obj     = payment_vault_obj;
     }
 
     // ─── Core lifecycle ───────────────────────────────────────────────────────
@@ -297,6 +303,7 @@ module securitization::pool_contract {
     public fun tranche_factory_obj(s: &PoolState): ID      { s.tranche_factory_obj }
     public fun issuance_contract_obj(s: &PoolState): ID    { s.issuance_contract_obj }
     public fun waterfall_engine_obj(s: &PoolState): ID     { s.waterfall_engine_obj }
+    public fun payment_vault_obj(s: &PoolState): ID        { s.payment_vault_obj }
     public fun is_active(s: &PoolState): bool              { s.pool_status == STATUS_ACTIVE }
     public fun is_defaulted(s: &PoolState): bool           { s.pool_status == STATUS_DEFAULTED }
     public fun is_matured(s: &PoolState): bool             { s.pool_status == STATUS_MATURED }

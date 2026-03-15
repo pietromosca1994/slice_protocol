@@ -38,6 +38,7 @@ module securitization::issuance_contract {
         TrancheRegistry, IssuanceAdminCap, mint
     };
     use spv::compliance_registry::{Self, ComplianceRegistry};
+    use spv::payment_vault::{Self, VaultBalance};
 
     // ─── Subscription record ──────────────────────────────────────────────────
 
@@ -88,19 +89,35 @@ module securitization::issuance_contract {
     /// `pool_obj_id` is now required so this state object is bound to exactly
     /// one pool and can be discovered by pool ID in the UI.
     ///
+    /// # Interface change
+    /// Prices are now set at creation time rather than at `start_issuance`,
+    /// so the waterfall outstanding principal can be derived as
+    /// `supply_cap × price` during pool setup without requiring the operator
+    /// to supply redundant explicit values.
+    ///
     /// # Parameters
-    /// - `pool_obj_id`  Object ID of the owning `PoolState`
+    /// - `pool_obj_id`   Object ID of the owning `PoolState`
+    /// - `price_senior`  Price in stablecoin base units per Senior token
+    /// - `price_mezz`    Price in stablecoin base units per Mezz token
+    /// - `price_junior`  Price in stablecoin base units per Junior token
     public entry fun create_issuance_state<C>(
-        _cap:        &IssuanceOwnerCap,
-        pool_obj_id: ID,
-        ctx:         &mut TxContext,
+        _cap:         &IssuanceOwnerCap,
+        pool_obj_id:  ID,
+        price_senior: u64,
+        price_mezz:   u64,
+        price_junior: u64,
+        ctx:          &mut TxContext,
     ) {
+        assert!(price_senior > 0, errors::zero_price_per_unit());
+        assert!(price_mezz   > 0, errors::zero_price_per_unit());
+        assert!(price_junior > 0, errors::zero_price_per_unit());
+
         let state = IssuanceState<C> {
             id:                    object::new(ctx),
             pool_obj_id,
-            price_per_unit_senior: 0,
-            price_per_unit_mezz:   0,
-            price_per_unit_junior: 0,
+            price_per_unit_senior: price_senior,
+            price_per_unit_mezz:   price_mezz,
+            price_per_unit_junior: price_junior,
             sale_start:            0,
             sale_end:              0,
             total_raised:          0,
@@ -115,22 +132,19 @@ module securitization::issuance_contract {
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 
-    /// Open the subscription window with configured per-tranche prices.
+    /// Open the subscription window. Prices were fixed at `create_issuance_state`
+    /// and cannot change here.
     ///
     /// # Parameters
-    /// - `sale_start`    Earliest timestamp (ms) at which `invest` is accepted
-    /// - `sale_end`      Latest timestamp (ms); after this `invest` is rejected
-    /// - `price_*`       Price in stablecoin base units per token unit
+    /// - `sale_start`  Earliest timestamp (ms) at which `invest` is accepted
+    /// - `sale_end`    Latest timestamp (ms); after this `invest` is rejected
     public entry fun start_issuance<C>(
-        _cap:         &IssuanceOwnerCap,
-        state:        &mut IssuanceState<C>,
-        pool:         &PoolState,
-        sale_start:   u64,
-        sale_end:     u64,
-        price_senior: u64,
-        price_mezz:   u64,
-        price_junior: u64,
-        clock:        &Clock,
+        _cap:       &IssuanceOwnerCap,
+        state:      &mut IssuanceState<C>,
+        pool:       &PoolState,
+        sale_start: u64,
+        sale_end:   u64,
+        clock:      &Clock,
     ) {
         // Ensure this issuance state is bound to the provided pool
         assert!(state.pool_obj_id == pool_contract::pool_obj_id(pool), errors::pool_not_active());
@@ -139,19 +153,18 @@ module securitization::issuance_contract {
         assert!(pool_contract::is_active(pool),                         errors::pool_not_active());
         assert!(sale_end > sale_start,                                  errors::invalid_sale_window());
         assert!(sale_end > clock::timestamp_ms(clock),                  errors::invalid_sale_window());
-        assert!(price_senior > 0,                                       errors::zero_price_per_unit());
-        assert!(price_mezz   > 0,                                       errors::zero_price_per_unit());
-        assert!(price_junior > 0,                                       errors::zero_price_per_unit());
+        // Prices must have been set at creation
+        assert!(state.price_per_unit_senior > 0,                        errors::zero_price_per_unit());
+        assert!(state.price_per_unit_mezz   > 0,                        errors::zero_price_per_unit());
+        assert!(state.price_per_unit_junior > 0,                        errors::zero_price_per_unit());
 
-        state.price_per_unit_senior = price_senior;
-        state.price_per_unit_mezz   = price_mezz;
-        state.price_per_unit_junior = price_junior;
-        state.sale_start            = sale_start;
-        state.sale_end              = sale_end;
-        state.issuance_active       = true;
+        state.sale_start      = sale_start;
+        state.sale_end        = sale_end;
+        state.issuance_active = true;
 
         events::emit_issuance_started(
-            sale_start, sale_end, price_senior, price_mezz, price_junior,
+            sale_start, sale_end,
+            state.price_per_unit_senior, state.price_per_unit_mezz, state.price_per_unit_junior,
             clock::timestamp_ms(clock),
         );
     }
@@ -255,19 +268,26 @@ module securitization::issuance_contract {
         events::emit_refund_issued(investor, refund_amount, clock::timestamp_ms(clock));
     }
 
-    /// Release all vault funds to the PaymentVault address after a successful issuance.
+    /// Release all issuance proceeds into the `PaymentVault` after a successful issuance.
+    ///
+    /// Takes a direct mutable reference to `VaultBalance<C>` rather than an address.
+    /// Using an address would send a `Coin` to the vault's object ID via
+    /// `transfer::public_transfer`, but `VaultBalance` has no object-receive
+    /// mechanism — the coin would be permanently inaccessible. Instead we extract
+    /// the `Balance<C>` primitive and pass it to `payment_vault::receive_balance`,
+    /// which joins it directly into the vault's internal balance.
     public entry fun release_funds_to_vault<C>(
-        _cap:          &IssuanceOwnerCap,
-        state:         &mut IssuanceState<C>,
-        vault_address: address,
-        ctx:           &mut TxContext,
+        _cap:  &IssuanceOwnerCap,
+        state: &mut IssuanceState<C>,
+        vault: &mut VaultBalance<C>,
+        clock: &Clock,
     ) {
         assert!(state.issuance_ended, errors::issuance_not_active());
         assert!(state.succeeded,      errors::refund_not_permitted());
         let total = balance::value(&state.vault_balance);
         assert!(total > 0,            errors::no_subscription());
-        let coin = coin::take(&mut state.vault_balance, total, ctx);
-        transfer::public_transfer(coin, vault_address);
+        let funds = balance::split(&mut state.vault_balance, total);
+        payment_vault::receive_balance(vault, funds, clock);
     }
 
     // ─── Read-only accessors ──────────────────────────────────────────────────
@@ -287,4 +307,7 @@ module securitization::issuance_contract {
     public fun has_subscription<C>(s: &IssuanceState<C>, investor: address): bool {
         table::contains(&s.subscriptions, investor)
     }
+
+    #[test_only]
+    public fun init_for_testing(ctx: &mut TxContext) { init(ctx); }
 }

@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { iotaClient } from "../services/iota-client";
 import { config } from "../config";
+import { logger } from "../utils/logger"
 
 export const healthRouter = Router();
 
@@ -15,7 +16,8 @@ healthRouter.get("/", async (_req: Request, res: Response) => {
       readOnly:        config.readOnly,
       spvRegistryId:   config.spvRegistryId,
     });
-  } catch {
+  } catch (err) {                                                                                                                                     
+    logger.warn({ err }, "Health check failed");
     res.status(503).json({ status: "degraded", reason: "Cannot reach IOTA RPC" });
   }
 });

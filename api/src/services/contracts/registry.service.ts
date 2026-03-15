@@ -6,7 +6,7 @@
  * all downstream object IDs are read from PoolState's _obj fields.
  */
 import { config } from "../../config";
-import { iotaClient, fetchObject } from "../iota-client";
+import { iotaClient, fetchObject, fetchObjectWithType } from "../iota-client";
 import { logger } from "../../utils/logger";
 
 // ── Raw on-chain shapes ───────────────────────────────────────────────────────
@@ -35,6 +35,7 @@ interface RawPoolState {
   tranche_factory_obj:           string;
   issuance_contract_obj:         string;
   waterfall_engine_obj:          string;
+  payment_vault_obj:             string;
   initialised:                   boolean;
 }
 
@@ -110,19 +111,21 @@ export interface ContractObjects {
   trancheFactoryObj:   string | null;
   issuanceContractObj: string | null;
   waterfallEngineObj:  string | null;
+  paymentVaultObj:     string | null;
 }
 
 export interface PoolSummary {
-  poolObjId:            string;
-  poolId:               string;
-  spv:                  string;
-  originator:           string;
-  status:               PoolStatus;
-  totalPoolValue:       bigint;
-  outstandingPrincipal: bigint;
-  interestRateBps:      number;
-  maturityDate:         Date;
-  initialised:          boolean;
+  poolObjId:                string;
+  poolId:                   string;
+  spv:                      string;
+  originator:               string;
+  status:                   PoolStatus;
+  totalPoolValue:           bigint;
+  outstandingPrincipal:     bigint;
+  interestRateBps:          number;
+  maturityDate:             Date;
+  initialised:              boolean;
+  securitizationPackageId:  string;
   contractAddresses: {
     trancheFactory:   string;
     issuanceContract: string;
@@ -181,8 +184,7 @@ export class RegistryService {
     return {
       poolCount:  Number(raw.pool_count),
       packageIds: {
-        spv:             config.spvPackageId,
-        securitization:  config.securitizationPackageId,
+        spv: config.spvPackageId,
       },
     };
   }
@@ -207,8 +209,10 @@ export class RegistryService {
   }
 
   async getPool(poolObjId: string): Promise<PoolSummary> {
-    const raw = await fetchObject<RawPoolState>(poolObjId);
-    return this._normalisePool(raw);
+    const { fields, objectType } = await fetchObjectWithType<RawPoolState>(poolObjId);
+    // objectType is "0x<pkgId>::pool_contract::PoolState" — extract the package ID
+    const securitizationPackageId = objectType.split("::")[0] ?? "";
+    return this._normalisePool(fields, securitizationPackageId);
   }
 
   async getFullPool(poolObjId: string): Promise<FullPool> {
@@ -301,18 +305,19 @@ export class RegistryService {
     }
   }
 
-  private _normalisePool(raw: RawPoolState): PoolSummary {
+  private _normalisePool(raw: RawPoolState, securitizationPackageId: string): PoolSummary {
     return {
-      poolObjId:            raw.pool_obj_id,
-      poolId:               hex2utf8(raw.pool_id),
-      spv:                  raw.spv,
-      originator:           raw.originator,
-      status:               POOL_STATUS[raw.pool_status] ?? "Created",
-      totalPoolValue:       BigInt(raw.total_pool_value),
-      outstandingPrincipal: BigInt(raw.current_outstanding_principal),
-      interestRateBps:      Number(raw.interest_rate),
-      maturityDate:         new Date(Number(raw.maturity_date)),
-      initialised:          raw.initialised,
+      poolObjId:               raw.pool_obj_id,
+      poolId:                  hex2utf8(raw.pool_id),
+      spv:                     raw.spv,
+      originator:              raw.originator,
+      status:                  POOL_STATUS[raw.pool_status] ?? "Created",
+      totalPoolValue:          BigInt(raw.total_pool_value),
+      outstandingPrincipal:    BigInt(raw.current_outstanding_principal),
+      interestRateBps:         Number(raw.interest_rate),
+      maturityDate:            new Date(Number(raw.maturity_date)),
+      initialised:             raw.initialised,
+      securitizationPackageId,
       contractAddresses: {
         trancheFactory:   raw.tranche_factory,
         issuanceContract: raw.issuance_contract,
@@ -322,6 +327,7 @@ export class RegistryService {
         trancheFactoryObj:   isZeroId(raw.tranche_factory_obj)   ? null : raw.tranche_factory_obj,
         issuanceContractObj: isZeroId(raw.issuance_contract_obj) ? null : raw.issuance_contract_obj,
         waterfallEngineObj:  isZeroId(raw.waterfall_engine_obj)  ? null : raw.waterfall_engine_obj,
+        paymentVaultObj:     isZeroId(raw.payment_vault_obj)     ? null : raw.payment_vault_obj,
       },
     };
   }

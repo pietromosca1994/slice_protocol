@@ -1,0 +1,691 @@
+{
+  "info": {
+    "name": "Slice Protocol API",
+    "description": "REST API for the Slice Protocol on-chain securitization engine (IOTA). Import this collection into Postman and set the base_url variable to your running API instance.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:3000",
+      "type": "string"
+    },
+    {
+      "key": "pool_obj_id",
+      "value": "0x...",
+      "description": "PoolState object ID returned by POST /pools",
+      "type": "string"
+    },
+    {
+      "key": "vault_id",
+      "value": "0x...",
+      "description": "VaultBalance object ID returned by POST /vault/create",
+      "type": "string"
+    },
+    {
+      "key": "compliance_registry_id",
+      "value": "0x...",
+      "description": "ComplianceRegistry object ID (from SPV package deployment)",
+      "type": "string"
+    },
+    {
+      "key": "investor_address",
+      "value": "0x...",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/health",
+            "description": "Returns node connectivity status and API configuration."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"status\": \"ok\",\n  \"network\": \"testnet\",\n  \"chainId\": \"0x...\",\n  \"readOnly\": false,\n  \"spvRegistryId\": \"0x...\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Registry (read-only)",
+      "item": [
+        {
+          "name": "GET /registry",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/registry",
+            "description": "Returns SPVRegistry metadata: pool count and SPV package IDs."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"poolCount\": 2,\n  \"packageIds\": {\n    \"spv\": \"0x...\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "GET /registry/pools",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/registry/pools",
+            "description": "Returns all pool summaries (reads every PoolState object indexed in the registry). Each entry includes the per-pool securitizationPackageId."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "[\n  {\n    \"poolObjId\": \"0x...\",\n    \"poolId\": \"POOL-2025-001\",\n    \"spv\": \"0x...\",\n    \"originator\": \"0x...\",\n    \"status\": 2,\n    \"totalPoolValue\": \"10000000000\",\n    \"interestRate\": 500,\n    \"maturityDate\": 1893456000000,\n    \"securitizationPackageId\": \"0x...\",\n    \"contractObjects\": {\n      \"trancheFactoryObj\": \"0x...\",\n      \"issuanceContractObj\": \"0x...\",\n      \"waterfallEngineObj\": \"0x...\"\n    }\n  }\n]"
+            }
+          ]
+        },
+        {
+          "name": "GET /registry/pools/:poolObjId",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/registry/pools/{{pool_obj_id}}",
+            "description": "Returns full pool detail including tranches, issuance state, and waterfall state."
+          }
+        },
+        {
+          "name": "GET /registry/pools/:poolObjId/tranches",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/registry/pools/{{pool_obj_id}}/tranches",
+            "description": "Returns TrancheRegistry state for the pool."
+          }
+        },
+        {
+          "name": "GET /registry/pools/:poolObjId/issuance",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/registry/pools/{{pool_obj_id}}/issuance",
+            "description": "Returns IssuanceState for the pool."
+          }
+        },
+        {
+          "name": "GET /registry/pools/:poolObjId/waterfall",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/registry/pools/{{pool_obj_id}}/waterfall",
+            "description": "Returns WaterfallState for the pool."
+          }
+        },
+        {
+          "name": "GET /registry/spv/:spvAddress/pools",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/registry/spv/0xSPV_ADDRESS_HERE/pools",
+              "host": ["{{base_url}}"],
+              "path": ["registry", "spv", "0xSPV_ADDRESS_HERE", "pools"]
+            },
+            "description": "Returns pool object IDs owned by a specific SPV address."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"spv\": \"0x...\",\n  \"poolIds\": [\"0x...\", \"0x...\"]\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Pools (write)",
+      "description": "All write endpoints require ADMIN_SECRET_KEY to be set. Most return HTTP 202 with a transaction digest.",
+      "item": [
+        {
+          "name": "POST /pools — Create pool (one-shot)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/pools",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"spv\": \"0xSPV_ADDRESS\",\n  \"poolId\": \"POOL-2025-001\",\n  \"originator\": \"0xORIGINATOR_ADDRESS\",\n  \"totalPoolValue\": \"10000000000\",\n  \"interestRate\": 500,\n  \"maturityDate\": 1893456000000,\n  \"assetHash\": \"abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\",\n  \"oracleAddress\": \"0xORACLE_ADDRESS\",\n  \"seniorSupplyCap\": \"5000\",\n  \"mezzSupplyCap\": \"3000\",\n  \"juniorSupplyCap\": \"2000\",\n  \"seniorFaceValue\": \"5000000000\",\n  \"mezzFaceValue\": \"3000000000\",\n  \"juniorFaceValue\": \"2000000000\",\n  \"seniorRateBps\": 300,\n  \"mezzRateBps\": 600,\n  \"juniorRateBps\": 1200,\n  \"paymentFrequency\": 0,\n  \"coinType\": \"0x2::iota::IOTA\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "One-shot pool creation. Deploys a fresh securitization package, creates the PoolState, links all contracts, initialises the waterfall, and activates the pool. Returns poolStateId, securitizationPackageId, and issuanceStateId.\n\n- paymentFrequency: 0 = Monthly, 1 = Quarterly\n- interestRate: basis points (500 = 5%)\n- seniorRateBps/mezzRateBps/juniorRateBps: per-tranche interest rates in bps\n- seniorFaceValue/mezzFaceValue/juniorFaceValue: principal outstanding per tranche in stablecoin base units (used directly by waterfall)\n- seniorSupplyCap/mezzSupplyCap/juniorSupplyCap: max tokens per tranche; token price is derived as faceValue / supplyCap\n- assetHash: 64 hex chars (SHA-256 of off-chain legal docs)\n- coinType: stablecoin type for IssuanceState (e.g. '0x2::iota::IOTA')"
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "status": "Created",
+              "code": 201,
+              "body": "{\n  \"poolStateId\": \"0x...\",\n  \"securitizationPackageId\": \"0x...\",\n  \"issuanceStateId\": \"0x...\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "POST /pools/:poolObjId/activate",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/pools/{{pool_obj_id}}/activate",
+            "description": "Transition pool status Created → Active. Normally called automatically by POST /pools, but available standalone."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        },
+        {
+          "name": "POST /pools/:poolObjId/default",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/pools/{{pool_obj_id}}/default",
+            "description": "Transition pool status Active → Defaulted. Admin-triggered default."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        },
+        {
+          "name": "POST /pools/:poolObjId/close",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/pools/{{pool_obj_id}}/close",
+            "description": "Transition pool status Active|Defaulted → Matured."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Issuance",
+      "item": [
+        {
+          "name": "POST /pools/:poolObjId/issuance/start",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/pools/{{pool_obj_id}}/issuance/start",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"saleStart\": 1700000000000,\n  \"saleEnd\": 1702000000000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Open the subscription window for a pool. IssuanceState is derived from the pool's contract objects — no need to pass it in the body.\n\n- saleStart/saleEnd: Unix timestamps in milliseconds\n- Prices were fixed at pool creation (POST /pools) and are stored on-chain; they cannot be changed here."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        },
+        {
+          "name": "POST /pools/:poolObjId/issuance/invest",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/pools/{{pool_obj_id}}/issuance/invest",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trancheType\": 0,\n  \"amount\": \"5000000000\",\n  \"complianceRegistryId\": \"{{compliance_registry_id}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Submit an investment for the signer. coinType is derived from the on-chain IssuanceState — no need to pass it.\n\n- trancheType: 0 = Senior, 1 = Mezz, 2 = Junior\n- amount: stablecoin base units taken from the signer's wallet\n- complianceRegistryId: ComplianceRegistry object ID used to verify the signer"
+          },
+          "response": [{ "name": "202 Accepted", "status": "Accepted", "code": 202, "body": "{ \"digest\": \"...\" }" }]
+        },
+        {
+          "name": "POST /pools/:poolObjId/issuance/end",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/pools/{{pool_obj_id}}/issuance/end",
+            "description": "Close the subscription window. IssuanceState is derived from the pool automatically."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Waterfall",
+      "item": [
+        {
+          "name": "POST /pools/:poolObjId/waterfall/deposit",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/pools/{{pool_obj_id}}/waterfall/deposit",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": \"5000000000\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Record a pool repayment into the waterfall's pending funds."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        },
+        {
+          "name": "POST /pools/:poolObjId/waterfall/accrue",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/pools/{{pool_obj_id}}/waterfall/accrue",
+            "description": "Accrue simple interest since last distribution."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        },
+        {
+          "name": "POST /pools/:poolObjId/waterfall/run",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/pools/{{pool_obj_id}}/waterfall/run",
+            "description": "Execute the waterfall distribution: Senior interest → Senior principal → Mezz interest → Mezz principal → Junior → Reserve."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        },
+        {
+          "name": "POST /pools/:poolObjId/waterfall/turbo",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/pools/{{pool_obj_id}}/waterfall/turbo",
+            "description": "Switch waterfall to Turbo mode: redirect excess cash to Senior principal paydown."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        },
+        {
+          "name": "POST /pools/:poolObjId/waterfall/default",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/pools/{{pool_obj_id}}/waterfall/default",
+            "description": "Switch waterfall to Default mode: suspend Mezz/Junior distributions, route all recoveries to Senior."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Compliance",
+      "item": [
+        {
+          "name": "GET /compliance/:registryId/investor/:address",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/compliance/{{compliance_registry_id}}/investor/{{investor_address}}",
+            "description": "Returns whitelist status and KYC record for an investor address. Returns { address, whitelisted: false } if the investor is not registered."
+          },
+          "response": [
+            {
+              "name": "200 OK — whitelisted",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"address\": \"0x...\",\n  \"whitelisted\": true,\n  \"accreditationLevel\": 2,\n  \"jurisdiction\": \"US\",\n  \"holdingPeriodEnd\": \"2025-06-01T00:00:00.000Z\",\n  \"active\": true\n}"
+            },
+            {
+              "name": "200 OK — not registered",
+              "status": "OK",
+              "code": 200,
+              "body": "{ \"address\": \"0x...\", \"whitelisted\": false }"
+            }
+          ]
+        },
+        {
+          "name": "GET /compliance/:registryId/transfer-check",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/compliance/{{compliance_registry_id}}/transfer-check?from={{investor_address}}&to=0xRECIPIENT",
+              "host": ["{{base_url}}"],
+              "path": ["compliance", "{{compliance_registry_id}}", "transfer-check"],
+              "query": [
+                {
+                  "key": "from",
+                  "value": "{{investor_address}}"
+                },
+                {
+                  "key": "to",
+                  "value": "0xRECIPIENT"
+                }
+              ]
+            },
+            "description": "Checks whether a tranche token transfer between two addresses is currently permitted (both must be whitelisted, active, and past their holding period)."
+          },
+          "response": [
+            {
+              "name": "200 OK — allowed",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"allowed\": true,\n  \"from\": \"0x...\",\n  \"to\": \"0x...\",\n  \"issues\": []\n}"
+            },
+            {
+              "name": "200 OK — blocked",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"allowed\": false,\n  \"from\": \"0x...\",\n  \"to\": \"0x...\",\n  \"issues\": [\"Sender in holding period\"]\n}"
+            }
+          ]
+        },
+        {
+          "name": "POST /compliance/:registryId/investors",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/compliance/{{compliance_registry_id}}/investors",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"investor\": \"0xINVESTOR_ADDRESS\",\n  \"accreditationLevel\": 2,\n  \"jurisdiction\": \"US\",\n  \"didObjectId\": \"0x...\",\n  \"customHoldingMs\": 2592000000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Add a new investor to the compliance whitelist. Requires ADMIN_SECRET_KEY.\n\n- accreditationLevel: 1-4 (MiFID II / SEC Reg D classification)\n- jurisdiction: ISO-3166-1 alpha-2 (e.g. 'US', 'DE')\n- customHoldingMs: lock-up period in milliseconds (0 = default)\n- didObjectId: IOTA Identity DID credential object ID"
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        },
+        {
+          "name": "DELETE /compliance/:registryId/investors/:address",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/compliance/{{compliance_registry_id}}/investors/{{investor_address}}",
+            "description": "Soft-remove (deactivate) an investor. The record is retained but the investor is marked inactive and cannot transfer or receive tranche tokens."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        },
+        {
+          "name": "PATCH /compliance/:registryId/investors/:address/accreditation",
+          "request": {
+            "method": "PATCH",
+            "url": "{{base_url}}/compliance/{{compliance_registry_id}}/investors/{{investor_address}}/accreditation",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"newLevel\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Update an investor's accreditation level (1-4)."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Vault",
+      "item": [
+        {
+          "name": "GET /vault/:vaultId",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/vault/{{vault_id}}",
+            "description": "Returns current vault balance and accounting totals. All values are strings to preserve BigInt precision."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"vaultId\": \"0x...\",\n  \"balance\": \"50000000000\",\n  \"totalDeposited\": \"100000000000\",\n  \"totalDistributed\": \"50000000000\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "POST /vault/create",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/vault/create",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"coinType\": \"0x2::iota::IOTA\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Create and share a new VaultBalance<C> for a given stablecoin type. Requires ADMIN_SECRET_KEY."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        },
+        {
+          "name": "POST /vault/:vaultId/authorise-depositor",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/vault/{{vault_id}}/authorise-depositor",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"depositor\": \"0xDEPOSITOR_ADDRESS\",\n  \"coinType\": \"0x2::iota::IOTA\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Grant deposit rights to an address (e.g. the issuance contract address)."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        },
+        {
+          "name": "DELETE /vault/:vaultId/depositor/:depositor",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/vault/{{vault_id}}/depositor/0xDEPOSITOR_ADDRESS",
+              "host": ["{{base_url}}"],
+              "path": ["vault", "{{vault_id}}", "depositor", "0xDEPOSITOR_ADDRESS"]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"coinType\": \"0x2::iota::IOTA\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Revoke deposit rights from an address."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        },
+        {
+          "name": "POST /vault/:vaultId/release",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/vault/{{vault_id}}/release",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"recipient\": \"0xRECIPIENT_ADDRESS\",\n  \"amount\": \"10000000000\",\n  \"coinType\": \"0x2::iota::IOTA\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Release funds from the vault to a recipient address. Admin only."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{ \"digest\": \"...\" }"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

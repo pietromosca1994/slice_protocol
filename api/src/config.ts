@@ -19,12 +19,12 @@ const ConfigSchema = z.object({
   // On-chain addresses — the only things the operator must know besides the key
   SPV_REGISTRY_ID:          z.string().min(1, "SPV_REGISTRY_ID is required"),
   SPV_PACKAGE_ID:           z.string().min(1, "SPV_PACKAGE_ID is required"),
-  SECURITIZATION_PACKAGE_ID:z.string().min(1, "SECURITIZATION_PACKAGE_ID is required"),
 
   // Signer — optional: without it the API is read-only
   ADMIN_SECRET_KEY:         z.string().optional(),
 
   GAS_BUDGET:               z.coerce.number().default(100_000_000),
+  PUBLISH_GAS_BUDGET:       z.coerce.number().default(2_000_000_000),
 });
 
 const parsed = ConfigSchema.safeParse(process.env);
@@ -42,11 +42,11 @@ export const config = {
   port:                     env.PORT,
   logLevel:                 env.LOG_LEVEL,
   network:                  env.IOTA_NETWORK,
-  rpcUrl:                   env.IOTA_RPC_URL ?? networkUrls[env.IOTA_NETWORK],
+  rpcUrl:                   env.IOTA_RPC_URL || networkUrls[env.IOTA_NETWORK],
   spvRegistryId:            env.SPV_REGISTRY_ID,
   spvPackageId:             env.SPV_PACKAGE_ID,
-  securitizationPackageId:  env.SECURITIZATION_PACKAGE_ID,
   adminSecretKey:           env.ADMIN_SECRET_KEY,
   gasBudget:                env.GAS_BUDGET,
+  publishGasBudget:         env.PUBLISH_GAS_BUDGET,
   readOnly:                 !env.ADMIN_SECRET_KEY,
 } as const;
