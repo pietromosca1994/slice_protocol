@@ -1,70 +1,73 @@
-# IOTA Securitization Protocol — TypeScript REST API
+# Securitization Protocol API
 
-A production-ready Express API that exposes every entry-point of the IOTA Securitization Protocol Move contracts as HTTP endpoints. Supports **mainnet**, **testnet**, and **localnet** transparently.
+REST API for the Slice Protocol on-chain securitization engine (IOTA). Exposes read and write
+operations for all on-chain contracts via HTTP. The API discovers all pool and contract data by
+traversing the on-chain `SPVRegistry` object — only two env vars are required to get started.
 
----
-
-## Architecture
-
-```
-src/
-├── config/          # Env config & Winston logger
-├── middleware/       # Network resolver, error handler
-├── services/         # One service file per Move module
-│   ├── iotaClient.ts        # SDK client, signer, PTB helper
-│   ├── poolService.ts       # pool_contract module
-│   ├── complianceService.ts # compliance_registry module
-│   ├── trancheService.ts    # tranche_factory module
-│   ├── issuanceService.ts   # issuance_contract module
-│   ├── vaultService.ts      # payment_vault module
-│   └── waterfallService.ts  # waterfall_engine module
-├── routes/           # Express routers — one per domain
-├── types/            # TypeScript interfaces mirroring Move structs
-└── index.ts          # App bootstrap
-```
+Each pool gets its own freshly-deployed securitization package. `POST /pools` runs two
+transactions: one package deploy and one atomic PTB that creates, wires, and activates all
+contracts. If the PTB aborts for any reason the `SPVRegistry` is left untouched.
 
 ---
 
-## Quick Start
+## Environment variables
 
-### 1. Configure environment
+| Variable | Required | Description |
+|---|---|---|
+| `IOTA_NETWORK` | Yes | `testnet` \| `mainnet` \| `devnet` \| `localnet` |
+| `SPV_REGISTRY_ID` | Yes | Object ID of the shared `SPVRegistry` |
+| `SPV_PACKAGE_ID` | Yes | Published package ID of the `spv` package |
+| `ADMIN_SECRET_KEY` | No | Base64 Ed25519 private key. Omit for read-only mode. |
+| `PORT` | No | Server port (default `3000`) |
+| `LOG_LEVEL` | No | `fatal`/`error`/`warn`/`info`/`debug`/`trace` (default `info`) |
+| `GAS_BUDGET` | No | Gas budget per transaction in MIST (default `100000000`) |
+| `IOTA_RPC_URL` | No | Override RPC URL (defaults to network standard) |
+| `PACKAGES_PATH` | No | Absolute path to the repo's `packages/` directory. Auto-detected locally; set to `/app/packages` in Docker (done automatically by the Dockerfile). |
+
+The API derives all per-pool addresses (TrancheRegistry, IssuanceState, WaterfallState,
+securitization package ID) from the `PoolState` objects indexed in `SPVRegistry`.
+No per-pool configuration is required.
+
+---
+
+## Running with Docker
+
+The Docker build context must be the **repository root** (not `api/`) because the image
+copies the `packages/` directory to compile Move contracts at runtime.
 
 ```bash
-cp .env.example .env
-# Fill in PACKAGE_ID, object IDs, cap IDs, and SIGNER_PRIVATE_KEY
+# Run from the repository root
+cd ..
+
+# 1. Copy and fill in env
+cp api/.env.example api/.env
+
+# 2. Build and start (IOTA_CLI_URL build arg must point at the correct binary for your platform)
+#    See https://github.com/iotaledger/iota/releases for available downloads.
+docker compose -f api/docker-compose.yml up -d
+
+# 3. Check health
+curl http://localhost:3000/health
 ```
 
-### 2. Run locally
+> The Dockerfile installs the `iota` CLI via `IOTA_CLI_URL`. Update the default ARG in
+> `api/Dockerfile` (or pass `--build-arg IOTA_CLI_URL=...`) to match the release binary for
+> your platform and iota version.
+
+## Running locally
 
 ```bash
 npm install
-npm run dev         # ts-node-dev (hot reload)
-# or
-npm run build && npm start
-```
-
-### 3. Run with Docker
-
-```bash
-# Build & run (reads .env automatically)
-docker compose up --build
-
-# Or just the image
-docker build -t iota-sec-api .
-docker run --env-file .env -p 3000:3000 iota-sec-api
+cp .env.example .env   # fill in values
+npm run dev
 ```
 
 ---
 
-## Network Selection
+## Postman collection
 
-Every request can target a specific network via:
-
-| Method | Example |
-|--------|---------|
-| Query param | `GET /api/v1/pool?network=mainnet` |
-| Header | `X-IOTA-Network: testnet` |
-| Default | `IOTA_NETWORK` env var (fallback: `testnet`) |
+Import `postman/slice-protocol.postman_collection.json` into Postman. Set the `base_url`
+collection variable to your API instance (default `http://localhost:3000`).
 
 ---
 
@@ -72,178 +75,326 @@ Every request can target a specific network via:
 
 ### Health
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Service health + config summary |
+#### `GET /health`
+Returns node connectivity status and API configuration.
+
+```json
+{
+  "status": "ok",
+  "network": "testnet",
+  "chainId": "...",
+  "readOnly": false,
+  "spvRegistryId": "0x..."
+}
+```
 
 ---
 
-### Pool Contract — `/api/v1/pool`
+### Registry (read-only)
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/` | — | Read current PoolState |
-| POST | `/set-contracts` | AdminCap | Link downstream contract addresses |
-| POST | `/initialise` | AdminCap | Initialise pool parameters |
-| POST | `/activate` | AdminCap | Created → Active |
-| POST | `/update-performance` | OracleCap | Update outstanding principal |
-| POST | `/mark-default/oracle` | OracleCap | Active → Defaulted |
-| POST | `/mark-default/admin` | AdminCap | Active → Defaulted |
-| POST | `/close` | AdminCap | Any → Matured |
+#### `GET /registry`
+Returns SPVRegistry metadata.
+```json
+{ "poolCount": 3, "packageIds": { "spv": "0x..." } }
+```
 
-**POST /pool/initialise body:**
+#### `GET /registry/pools`
+Returns all pool summaries. Each entry includes `securitizationPackageId` (varies per pool).
+
+#### `GET /registry/pools/:poolObjId`
+Returns full pool detail including tranches, issuance state, and waterfall state.
+
+#### `GET /registry/pools/:poolObjId/tranches`
+Returns TrancheRegistry state for the pool.
+
+#### `GET /registry/pools/:poolObjId/issuance`
+Returns IssuanceState for the pool, including the linked vault object ID.
+
 ```json
 {
-  "poolId": "POOL-001",
-  "originator": "0xABC...",
-  "spv": "0xDEF...",
+  "issuanceActive": false,
+  "issuanceEnded":  true,
+  "succeeded":      true,
+  "totalRaised":    "10000000000",
+  "saleStart":      "2025-01-01T00:00:00.000Z",
+  "saleEnd":        "2025-02-01T00:00:00.000Z",
+  "prices": { "senior": "1000000", "mezz": "1000000", "junior": "1000000" },
+  "vaultObjId":     "0x..."
+}
+```
+
+`vaultObjId` is the object ID of the `PaymentVault` that receives proceeds when
+`POST /pools/:id/issuance/release` is called. It matches `contractObjects.paymentVaultObj`
+on the parent pool and is enforced on-chain — passing the wrong vault to the release call
+aborts with error `3010`.
+
+#### `GET /registry/pools/:poolObjId/waterfall`
+Returns WaterfallState for the pool.
+
+#### `GET /registry/spv/:spvAddress/pools`
+Returns pool object IDs owned by a specific SPV address.
+```json
+{ "spv": "0x...", "poolIds": ["0x...", "0x..."] }
+```
+
+---
+
+### Pools (write — requires ADMIN_SECRET_KEY)
+
+Write endpoints return `{ "digest": "..." }` with HTTP 202 (except `POST /pools` which returns
+HTTP 201 with full result). The transaction is submitted immediately; use the digest to confirm
+finality on-chain.
+
+#### `POST /pools` — atomic pool creation
+
+Deploys a fresh securitization package per pool (tx 1), then atomically creates, wires, and
+activates all contracts in a single PTB (tx 2). If the PTB aborts, `SPVRegistry` is untouched.
+Returns all relevant object IDs on success.
+
+```json
+{
+  "spv":            "0xSPV_ADDRESS",
+  "poolId":         "POOL-2025-001",
+  "originator":     "0xORIGINATOR_ADDRESS",
   "totalPoolValue": "10000000000",
-  "interestRate": 500,
-  "maturityDate": "1893456000000",
-  "assetHash": "abcdef1234567890..."
+  "interestRate":   500,
+  "maturityDate":   1893456000000,
+  "assetHash":      "abcd1234...64hexchars",
+  "oracleAddress":  "0xORACLE_ADDRESS",
+  "seniorSupplyCap":  "5000",
+  "mezzSupplyCap":    "3000",
+  "juniorSupplyCap":  "2000",
+  "seniorFaceValue":  "5000000000",
+  "mezzFaceValue":    "3000000000",
+  "juniorFaceValue":  "2000000000",
+  "seniorRateBps":    300,
+  "mezzRateBps":      600,
+  "juniorRateBps":    1200,
+  "paymentFrequency": 0,
+  "coinType":         "0x2::iota::IOTA"
 }
 ```
 
----
+Field notes:
+- `interestRate`: blended pool rate in basis points (500 = 5%)
+- `seniorRateBps`/`mezzRateBps`/`juniorRateBps`: per-tranche waterfall rates in bps
+- `seniorSupplyCap`/`mezzSupplyCap`/`juniorSupplyCap`: maximum token supply per tranche (number of tokens)
+- `seniorFaceValue`/`mezzFaceValue`/`juniorFaceValue`: principal outstanding per tranche in stablecoin base units; used directly as waterfall outstanding. Token price is derived as `faceValue / supplyCap`.
+- `paymentFrequency`: `0` = Monthly, `1` = Quarterly
+- `assetHash`: 64 hex characters (SHA-256 of off-chain legal documents)
+- `coinType`: Move type string of the stablecoin used for issuance
 
-### Compliance Registry — `/api/v1/compliance`
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/` | — | Registry state (restrictions flag, default holding period) |
-| GET | `/investor/:address` | — | Fetch single InvestorRecord |
-| POST | `/restrictions` | ComplianceAdminCap | Toggle global transfer restrictions |
-| POST | `/default-holding-period` | ComplianceAdminCap | Set default lock-up (ms) |
-| POST | `/investors` | ComplianceAdminCap | Add investor to whitelist |
-| DELETE | `/investors/:address` | ComplianceAdminCap | Deactivate investor |
-| PATCH | `/investors/:address/accreditation` | ComplianceAdminCap | Update accreditation level |
-
-**POST /compliance/investors body:**
+Response (HTTP 201):
 ```json
 {
-  "investor": "0xABC...",
-  "accreditationLevel": 3,
+  "poolStateId":             "0x...",
+  "securitizationPackageId": "0x...",
+  "issuanceStateId":         "0x...",
+  "vaultId":                 "0x..."
+}
+```
+
+#### Pool lifecycle
+
+```
+POST /pools/:id/activate    Created → Active  (only for pools not created via POST /pools)
+POST /pools/:id/default     Active → Defaulted
+POST /pools/:id/close       Active|Defaulted → Matured
+```
+
+> Pools created via `POST /pools` are born **Active** — the `/activate` endpoint is only needed
+> for pools left in `Created` state by a direct `create_pool` contract call. Calling it on an
+> already-Active pool returns HTTP 409.
+
+#### Issuance
+
+```
+POST /pools/:id/issuance/start    Open subscription window
+POST /pools/:id/issuance/invest   Submit an investment (signer pays)
+POST /pools/:id/issuance/end      Close subscription window
+POST /pools/:id/issuance/release  Move raised funds from IssuanceState → PaymentVault
+```
+
+##### `POST /pools/:id/issuance/start` body
+```json
+{
+  "saleStart": 1773700000000,
+  "saleEnd":   1774900000000
+}
+```
+
+`saleStart`/`saleEnd` are **Unix timestamps in milliseconds** — not seconds. Both must be in
+the future relative to the on-chain clock; `saleEnd` must exceed `saleStart`. The API validates
+these constraints before sending the transaction (HTTP 400 with a clear message on failure).
+Prices are fixed at pool creation time and stored on-chain — they cannot be changed here.
+The `IssuanceState` object is resolved automatically from the pool.
+
+##### `POST /pools/:id/issuance/invest` body
+```json
+{
+  "trancheType":          0,
+  "amount":               "5000000000",
+  "complianceRegistryId": "0xCOMPLIANCE_REGISTRY_ID"
+}
+```
+
+- `trancheType`: `0` = Senior, `1` = Mezzanine, `2` = Junior
+- `amount`: stablecoin amount in base units taken from the signer's wallet
+- `complianceRegistryId`: object ID of the `ComplianceRegistry` used to verify the signer
+
+The coin type is derived automatically from the on-chain `IssuanceState` type — no need to
+specify it. The `TrancheRegistry` and `IssuanceState` objects are resolved from the pool.
+
+##### `POST /pools/:id/issuance/release` — no body required
+
+Moves all raised stablecoin from `IssuanceState` into `PaymentVault`. Requires issuance to have
+ended and succeeded (`issuanceEnded: true`). The coin type is derived automatically.
+
+#### Waterfall
+
+```
+POST /pools/:id/waterfall/deposit   Record a pool repayment
+POST /pools/:id/waterfall/accrue    Accrue interest since last distribution
+POST /pools/:id/waterfall/run       Execute waterfall distribution
+POST /pools/:id/waterfall/turbo     Normal → Turbo mode
+POST /pools/:id/waterfall/default   Any mode → Default mode
+```
+
+##### `POST /pools/:id/waterfall/deposit` body
+```json
+{ "amount": "5000000000" }
+```
+
+All waterfall objects are resolved automatically from the pool's `contractObjects`.
+
+---
+
+### Compliance (spv package)
+
+#### `GET /compliance/:registryId/investor/:address`
+Returns whitelist status and record for an investor address.
+```json
+{
+  "address": "0x...",
+  "whitelisted": true,
+  "accreditationLevel": 2,
   "jurisdiction": "US",
-  "didObjectId": "0xDID...",
-  "customHoldingMs": "7776000000"
+  "holdingPeriodEnd": "2025-06-01T00:00:00.000Z",
+  "active": true
 }
 ```
 
-**Accreditation levels:** 1=Retail, 2=Professional, 3=Institutional, 4=Qualified Purchaser
-
----
-
-### Tranche Factory — `/api/v1/tranches`
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/` | — | Full TrancheRegistry state |
-| GET | `/:type` | — | TrancheInfo for type 0/1/2 |
-| POST | `/bootstrap` | TrancheAdminCap | Inject TreasuryCaps from coin wrappers |
-| POST | `/create` | TrancheAdminCap | Set supply caps and enable minting |
-| POST | `/disable-minting` | TrancheAdminCap | Permanently disable minting |
-| POST | `/melt/senior` | — | Burn SENIOR_COIN tokens |
-| POST | `/melt/mezz` | — | Burn MEZZ_COIN tokens |
-| POST | `/melt/junior` | — | Burn JUNIOR_COIN tokens |
-
----
-
-### Issuance Contract — `/api/v1/issuance`
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/:stateId` | — | IssuanceState for given object ID |
-| POST | `/create-state` | IssuanceOwnerCap | Create new IssuanceState shared object |
-| POST | `/start` | IssuanceOwnerCap | Open subscription window |
-| POST | `/end` | IssuanceOwnerCap | Close subscription window |
-| POST | `/invest` | — (KYC-gated on-chain) | Subscribe to a tranche |
-| POST | `/refund` | — | Claim refund if issuance cancelled |
-| POST | `/release-to-vault` | IssuanceOwnerCap | Release raised funds to PaymentVault |
-
-**POST /issuance/start body:**
+#### `GET /compliance/:registryId/transfer-check?from=0x...&to=0x...`
+Checks whether a transfer between two addresses is currently permitted.
 ```json
 {
-  "issuanceStateId": "0xISS...",
-  "coinType": "0xPKG::usdc::USDC",
-  "saleStart": "1700000000000",
-  "saleEnd": "1702592000000",
-  "priceSenior": "1000000",
-  "priceMezz": "1000000",
-  "priceJunior": "1000000"
+  "allowed": false,
+  "from": "0x...",
+  "to": "0x...",
+  "issues": ["Sender in holding period"]
 }
 ```
 
----
-
-### Payment Vault — `/api/v1/vault`
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/:vaultId` | — | VaultBalance state |
-| POST | `/create` | VaultAdminCap | Create new VaultBalance shared object |
-| POST | `/authorise-depositor` | VaultAdminCap | Grant deposit rights |
-| POST | `/revoke-depositor` | VaultAdminCap | Revoke deposit rights |
-| POST | `/deposit` | Authorised depositor | Deposit coin into vault |
-| POST | `/release` | VaultAdminCap | Release funds to recipient |
-
----
-
-### Waterfall Engine — `/api/v1/waterfall`
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/` | — | Full WaterfallState |
-| POST | `/initialise` | WaterfallAdminCap | Set tranche amounts + rates |
-| POST | `/accrue-interest` | — | Accrue interest since last timestamp |
-| POST | `/deposit-payment` | — | Record incoming pool repayment |
-| POST | `/run` | — | Execute full waterfall distribution |
-| POST | `/turbo-mode` | WaterfallAdminCap | Activate Turbo mode |
-| POST | `/default-mode/admin` | WaterfallAdminCap | Activate Default mode |
-| POST | `/default-mode/pool` | PoolCap | Activate Default mode (from pool) |
-
----
-
-## Response Format
-
-All endpoints return:
-
+#### `POST /compliance/:registryId/investors` — requires key
 ```json
 {
-  "success": true,
-  "data": { ... },
-  "network": "testnet"
+  "investor":           "0x...",
+  "accreditationLevel": 2,
+  "jurisdiction":       "US",
+  "didObjectId":        "0x...",
+  "customHoldingMs":    2592000000
 }
 ```
 
-Write endpoints additionally include:
+#### `DELETE /compliance/:registryId/investors/:address` — requires key
+Soft-removes (deactivates) an investor.
 
+#### `PATCH /compliance/:registryId/investors/:address/accreditation` — requires key
+```json
+{ "newLevel": 3 }
+```
+
+---
+
+### Vault (spv package)
+
+#### `GET /vault/:vaultId`
+Returns vault balance and accounting totals (all values as strings to preserve precision).
 ```json
 {
-  "success": true,
-  "data": {
-    "txDigest": "ABC123...",
-    "status": "success",
-    "gasUsed": "{ ... }"
-  },
-  "network": "testnet"
+  "vaultId":          "0x...",
+  "balance":          "50000000000",
+  "totalDeposited":   "100000000000",
+  "totalDistributed": "50000000000"
 }
 ```
 
-Error responses:
+#### `POST /vault/create` — requires key
+```json
+{ "coinType": "0x2::iota::IOTA" }
+```
 
+#### `POST /vault/:vaultId/authorise-depositor` — requires key
+```json
+{ "depositor": "0x...", "coinType": "0x2::iota::IOTA" }
+```
+
+#### `DELETE /vault/:vaultId/depositor/:depositor` — requires key
+```json
+{ "coinType": "0x2::iota::IOTA" }
+```
+
+#### `POST /vault/:vaultId/release` — requires key
 ```json
 {
-  "success": false,
-  "error": "Descriptive error message",
-  "network": "testnet"
+  "recipient": "0x...",
+  "amount":    "10000000000",
+  "coinType":  "0x2::iota::IOTA"
 }
 ```
 
 ---
 
-## Security Notes
+## Pool lifecycle
 
-- **Never commit** `SIGNER_PRIVATE_KEY` to source control. Use Docker secrets, AWS Secrets Manager, or Vault in production.
-- The signer key should hold only the minimum capability objects needed for the operations you expose.
-- Consider adding an API key middleware (`X-API-Key` header) in front of all write endpoints before exposing this service publicly.
-- The `set_transfer_restrictions(enabled: false)` endpoint bypasses all KYC checks — restrict access accordingly.
+```
+POST /pools
+  ├─ tx 1: deploy securitization package
+  └─ tx 2: atomic PTB — create pool + issuance + vault, wire contracts, activate
+       ↓
+  Pool: Active
+
+POST /compliance/:regId/investors     ← KYC investors (any time before issuance)
+       ↓
+POST /pools/:id/issuance/start        ← open subscription window (set saleStart / saleEnd)
+POST /pools/:id/issuance/invest       ← investor subscribes (repeatable, signer's wallet pays)
+POST /pools/:id/issuance/end          ← close subscription window
+POST /pools/:id/issuance/release      ← transfer raised funds to PaymentVault
+       ↓
+  [Quarterly / monthly cycle]
+POST /pools/:id/waterfall/deposit     ← record borrower repayment
+POST /pools/:id/waterfall/accrue      ← accrue interest
+POST /pools/:id/waterfall/run         ← distribute (Senior → Mezz → Junior → Reserve)
+       ↓
+  [Optional]
+POST /pools/:id/waterfall/turbo       ← Normal → Turbo (accelerated repayment)
+POST /pools/:id/default               ← Active → Defaulted
+       ↓
+POST /pools/:id/close                 ← Pool → Matured
+```
+
+---
+
+## Error responses
+
+All errors follow:
+```json
+{ "error": "Human-readable message", "details": { ... } }
+```
+
+| Status | Meaning |
+|---|---|
+| 400 | Validation error — check `details` |
+| 403 | Read-only mode or missing capability |
+| 404 | Object not found |
+| 500 | RPC or transaction error |

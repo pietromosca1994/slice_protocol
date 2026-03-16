@@ -1,63 +1,57 @@
-import 'express-async-errors';
-import express from 'express';
-import cors from 'cors';
-import helmet from 'helmet';
-import morgan from 'morgan';
+import express from "express";
+import helmet from "helmet";
+import cors from "cors";
+import rateLimit from "express-rate-limit";
+import pinoHttp from "pino-http";
 
-import { config } from './config';
-import { logger } from './config/logger';
-import { networkMiddleware, errorHandler } from './middleware';
-
-import poolRoutes from './routes/pool';
-import complianceRoutes from './routes/compliance';
-import trancheRoutes from './routes/tranches';
-import issuanceRoutes from './routes/issuance';
-import vaultRoutes from './routes/vault';
-import waterfallRoutes from './routes/waterfall';
+import { config } from "./config";
+import { logger } from "./utils/logger";
+import { errorHandler } from "./middleware/errorHandler";
+import { healthRouter }              from "./routes/health.routes";
+import { spvRegistryRouter }         from "./routes/spv_registry.routes";
+import { poolContractRouter }        from "./routes/pool_contract.routes";
+import { issuanceContractRouter }    from "./routes/issuance_contract.routes";
+import { waterfallEngineRouter }     from "./routes/waterfall_engine.routes";
+import { complianceRegistryRouter }  from "./routes/compliance_registry.routes";
+import { paymentVaultRouter }        from "./routes/payment_vault.routes";
 
 const app = express();
 
-// ─── Core middleware ──────────────────────────────────────────────────────────
+// Serialize BigInt values (returned by the IOTA SDK) as strings
+app.set("json replacer", (_key: string, value: unknown) =>
+  typeof value === "bigint" ? value.toString() : value,
+);
+
+// ── Global middleware ──────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors());
 app.use(express.json());
-app.use(morgan('combined', { stream: { write: (msg) => logger.info(msg.trim()) } }));
+app.use(pinoHttp({ logger }));
+app.use(rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
 
-// ─── Network resolution (reads ?network= or X-IOTA-Network header) ───────────
-app.use(networkMiddleware);
+// ── Routes ─────────────────────────────────────────────────────────────────────
+app.use("/health",     healthRouter);
+app.use("/registry",   spvRegistryRouter);
+app.use("/pools",      poolContractRouter);
+app.use("/pools",      issuanceContractRouter);
+app.use("/pools",      waterfallEngineRouter);
+app.use("/compliance", complianceRegistryRouter);
+app.use("/vault",      paymentVaultRouter);
 
-// ─── Health check ─────────────────────────────────────────────────────────────
-app.get('/health', (_req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'iota-securitization-api',
-    version: '1.0.0',
-    defaultNetwork: config.network,
-    packageId: config.packageId || 'not-configured',
-  });
-});
+// ── 404 ────────────────────────────────────────────────────────────────────────
+app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 
-// ─── API routes ───────────────────────────────────────────────────────────────
-app.use('/api/v1/pool', poolRoutes);
-app.use('/api/v1/compliance', complianceRoutes);
-app.use('/api/v1/tranches', trancheRoutes);
-app.use('/api/v1/issuance', issuanceRoutes);
-app.use('/api/v1/vault', vaultRoutes);
-app.use('/api/v1/waterfall', waterfallRoutes);
-
-// ─── 404 ──────────────────────────────────────────────────────────────────────
-app.use((_req, res) => {
-  res.status(404).json({ success: false, error: 'Route not found' });
-});
-
-// ─── Error handler ────────────────────────────────────────────────────────────
+// ── Error handler (must be last) ───────────────────────────────────────────────
 app.use(errorHandler);
 
-// ─── Start ────────────────────────────────────────────────────────────────────
+// ── Start ──────────────────────────────────────────────────────────────────────
 app.listen(config.port, () => {
-  logger.info(`IOTA Securitization API listening on port ${config.port}`);
-  logger.info(`Default network: ${config.network}`);
-  logger.info(`Package ID: ${config.packageId || '(not set)'}`);
+  logger.info({
+    port:          config.port,
+    network:       config.network,
+    readOnly:      config.readOnly,
+    spvRegistryId: config.spvRegistryId,
+  }, "🚀  Securitization API started");
 });
 
 export default app;

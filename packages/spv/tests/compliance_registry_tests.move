@@ -8,14 +8,14 @@
 ///  - Accreditation level update
 ///  - Global restrictions toggle
 #[test_only, allow(unused_use, unused_variable, unused_const, duplicate_alias, unused_function)]
-module securitization::compliance_registry_tests {
+module spv::compliance_registry_tests {
     use iota::test_scenario::{Self as ts};
     use iota::clock::{Self, Clock};
     use iota::object;
-    use securitization::compliance_registry::{
+    use spv::compliance_registry::{
         Self, ComplianceRegistry, ComplianceAdminCap,
     };
-    use securitization::errors;
+    use spv::errors;
 
     // ─── Addresses ────────────────────────────────────────────────────────────
     const ADMIN:     address = @0xD0;
@@ -86,7 +86,7 @@ module securitization::compliance_registry_tests {
     }
 
     #[test]
-    #[expected_failure(abort_code = securitization::errors::EInvestorAlreadyExists, location = securitization::compliance_registry)]
+    #[expected_failure(abort_code = spv::errors::EInvestorAlreadyExists, location = spv::compliance_registry)]
     fun test_add_duplicate_investor_aborts() {
         let mut scenario = ts::begin(ADMIN);
         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
@@ -100,7 +100,7 @@ module securitization::compliance_registry_tests {
     }
 
     #[test]
-    #[expected_failure(abort_code = securitization::errors::EInvalidAccreditationLevel, location = securitization::compliance_registry)]
+    #[expected_failure(abort_code = spv::errors::EInvalidAccreditationLevel, location = spv::compliance_registry)]
     fun test_add_investor_invalid_level_zero_aborts() {
         let mut scenario = ts::begin(ADMIN);
         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
@@ -122,7 +122,7 @@ module securitization::compliance_registry_tests {
     }
 
     #[test]
-    #[expected_failure(abort_code = securitization::errors::EInvalidAccreditationLevel, location = securitization::compliance_registry)]
+    #[expected_failure(abort_code = spv::errors::EInvalidAccreditationLevel, location = spv::compliance_registry)]
     fun test_add_investor_invalid_level_five_aborts() {
         let mut scenario = ts::begin(ADMIN);
         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
@@ -144,7 +144,7 @@ module securitization::compliance_registry_tests {
     }
 
     #[test]
-    #[expected_failure(abort_code = securitization::errors::EEmptyJurisdiction, location = securitization::compliance_registry)]
+    #[expected_failure(abort_code = spv::errors::EEmptyJurisdiction, location = spv::compliance_registry)]
     fun test_add_investor_empty_jurisdiction_aborts() {
         let mut scenario = ts::begin(ADMIN);
         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
@@ -192,7 +192,7 @@ module securitization::compliance_registry_tests {
     }
 
     #[test]
-    #[expected_failure(abort_code = securitization::errors::EInvestorNotWhitelisted, location = securitization::compliance_registry)]
+    #[expected_failure(abort_code = spv::errors::EInvestorNotWhitelisted, location = spv::compliance_registry)]
     fun test_remove_nonexistent_investor_aborts() {
         let mut scenario = ts::begin(ADMIN);
         let clock = clock::create_for_testing(ts::ctx(&mut scenario));

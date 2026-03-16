@@ -1,226 +1,392 @@
-# Slice Protocol — Deployment Guide
+# Slice Protocol
+
+On-chain securitization engine built on IOTA. Tokenises pools of illiquid financial assets
+(loans, mortgages, receivables) into tradeable Senior / Mezzanine / Junior tranche tokens,
+with a fully automated payment waterfall and KYC-gated issuance.
 
 ---
 
-## 0. Prerequisites — Get Your Private Key
+## Setup
 
-Import your wallet mnemonic and export the private key for the API:
+### 0. Prerequisites
+
+- **IOTA CLI** installed (`iota` in PATH)
+- **Node.js 20+** and **npm**
+- A funded IOTA wallet
+
+Export your wallet's private key for the API:
 
 ```bash
-iota keytool import "<mnemonic words>" <key_scheme>
-iota keytool list
-iota keytool export <address>
+iota keytool import "<mnemonic words>" ed25519
+iota keytool export <your-address>   # copy the iotaprivkey1... value
 ```
-
-Copy the `iotaprivkey1...` value into `SIGNER_PRIVATE_KEY` in your `.env` file.
 
 ---
 
-## 1. Run a Local IOTA Network (localnet only)
-
-> **Reference:** [IOTA Local Development Docs](https://docs.iota.org/developer/getting-started/local-network)
-
-Start the local node with faucet:
+### 1. Run a Local IOTA Node (localnet only)
 
 ```bash
 RUST_LOG="off,iota_node=info" iota start --force-regenesis --with-faucet
-```
 
-Configure and fund the CLI client:
-
-```bash
 iota client new-env --alias local --rpc http://127.0.0.1:9000
 iota client switch --env local
-iota client active-address
 iota client faucet
 ```
 
-> 🔍 **Local Explorer:** https://explorer.iota.org/?network=http%3A%2F%2F127.0.0.1%3A9000
+> Explorer: https://explorer.iota.org/?network=http%3A%2F%2F127.0.0.1%3A9000
 
 ---
 
-## 2. Deploy the Protocol
+### 2. Deploy the SPV Package (one-time)
+
+The `packages/spv` package is a singleton. Deploy it once per environment:
 
 ```bash
-chmod +x ./scripts/deploy.sh
-./scripts/deploy.sh [testnet|mainnet|localnet]
+cd packages/spv
+iota move build
+iota client publish .
 ```
 
-The script publishes the package and writes a deployment manifest to `deployments/`.  
-Copy all object IDs from the manifest into your `.env` file before proceeding.
+From the output, note:
+- The **package ID** (starts with `0x`, labelled `Published Objects`)
+- The **SPVRegistry object ID** (look for `spv::spv_registry::SPVRegistry` in created objects)
 
 ---
 
-## 3. Post-Deployment Setup
+### 3. Configure and Start the API
 
-The phases below must be executed **in order**. Each phase depends on objects created by the previous one.
+```bash
+cd api
+cp .env.example .env
+```
 
----
-
-### Phase 1 — Infrastructure Setup *(one-time)*
-
-Wire all contracts together and prepare the issuance infrastructure.
-
-> ⚠️ `set-contracts` **must** come before `initialise` — the pool reads `oracle_address` during initialisation to mint the `OracleCap`. If the address is not set, the cap is sent to `@0x0` and permanently lost.
-
-| # | Method | Endpoint | Notes |
-|---|--------|----------|-------|
-| 1 | `POST` | `/api/v1/pool/set-contracts` | Link tranche factory, issuance contract, waterfall engine, oracle address |
-| 2 | `POST` | `/api/v1/pool/initialise` | Set pool parameters; mints `OracleCap` → oracle address |
-| 3 | `POST` | `/api/v1/pool/activate` | Transition pool `Created → Active` |
-| 4 | `POST` | `/api/v1/tranches/bootstrap` | Extract `TreasuryCap`s from coin wrappers into the registry |
-| 5 | `POST` | `/api/v1/tranches/create` | Set supply caps; issues `IssuanceAdminCap` → issuance contract |
-| 6 | `POST` | `/api/v1/vault/create` | Create the `VaultBalance<C>` shared object |
-| 7 | `POST` | `/api/v1/vault/authorise-depositor` | Grant deposit rights to the issuance contract address |
-| 8 | `POST` | `/api/v1/issuance/create-state` | Create the `IssuanceState<C>` shared object |
-| 9 | `POST` | `/api/v1/waterfall/initialise` | Set per-tranche outstanding amounts, interest rates, and payment frequency |
-
----
-
-### Phase 2 — KYC / Investor Onboarding
-
-Register and verify investors before the subscription window opens.
-
-| # | Method | Endpoint | Notes |
-|---|--------|----------|-------|
-| 10 | `POST` | `/api/v1/compliance/default-holding-period` | e.g. `7776000000` ms = 90 days |
-| 11 | `POST` | `/api/v1/compliance/investors` | Add investor A — institutional (level 3), jurisdiction `US` |
-| 12 | `POST` | `/api/v1/compliance/investors` | Add investor B — professional (level 2), jurisdiction `DE` |
-| 13 | `GET`  | `/api/v1/compliance/investor/:address` | Verify both investors are active and whitelisted |
-
----
-
-### Phase 3 — Primary Issuance
-
-Open the subscription window and accept stablecoin investments.
-
-| # | Method | Endpoint | Notes |
-|---|--------|----------|-------|
-| 14 | `POST` | `/api/v1/issuance/start` | Set `saleStart`, `saleEnd`, and per-tranche prices |
-| 15 | `POST` | `/api/v1/issuance/invest` | Investor A buys **Senior** — `trancheType: 0` |
-| 16 | `POST` | `/api/v1/issuance/invest` | Investor A buys **Mezz** — `trancheType: 1` |
-| 17 | `POST` | `/api/v1/issuance/invest` | Investor B buys **Junior** — `trancheType: 2` |
-| 18 | `GET`  | `/api/v1/tranches/0` | Verify Senior minted amount increased |
-| 19 | `GET`  | `/api/v1/tranches/1` | Verify Mezz minted amount increased |
-| 20 | `GET`  | `/api/v1/tranches/2` | Verify Junior minted amount increased |
-| 21 | `POST` | `/api/v1/issuance/end` | Close the subscription window |
-| 22 | `POST` | `/api/v1/issuance/release-to-vault` | Transfer all raised funds to `PaymentVault` |
-| 23 | `GET`  | `/api/v1/vault/:vaultId` | Verify vault balance equals total raised |
-
----
-
-### Phase 4 — Ongoing Pool Servicing
-
-Repeat each payment period (monthly or quarterly).
-
-| # | Method | Endpoint | Notes |
-|---|--------|----------|-------|
-| 24 | `POST` | `/api/v1/pool/update-performance` | Oracle reports new outstanding principal |
-| 25 | `POST` | `/api/v1/waterfall/accrue-interest` | Accrue simple interest since last distribution |
-| 26 | `POST` | `/api/v1/waterfall/deposit-payment` | Record repayment amount into pending funds |
-| 27 | `POST` | `/api/v1/waterfall/run` | Execute waterfall: Senior → Mezz → Junior → Reserve |
-| 28 | `GET`  | `/api/v1/waterfall` | Verify outstanding principals reduced |
-
----
-
-### Phase 5 — Stress Scenario: Turbo Mode
-
-Activate when the borrower is ahead of schedule to accelerate Senior principal paydown.
-
-| # | Method | Endpoint | Notes |
-|---|--------|----------|-------|
-| 29 | `POST` | `/api/v1/waterfall/turbo-mode` | Redirect all excess cash to Senior principal paydown |
-| 30 | `POST` | `/api/v1/pool/update-performance` | Oracle reports larger-than-expected repayment |
-| 31 | `POST` | `/api/v1/waterfall/deposit-payment` | Record the repayment |
-| 32 | `POST` | `/api/v1/waterfall/run` | Excess after Senior obligations goes entirely to Senior principal |
-| 33 | `GET`  | `/api/v1/waterfall` | Confirm `seniorOutstanding` drops faster than normal mode |
-
----
-
-### Phase 6 — Stress Scenario: Default
-
-Suspend Mezz and Junior distributions; route all recoveries to Senior.
-
-| # | Method | Endpoint | Notes |
-|---|--------|----------|-------|
-| 34 | `POST` | `/api/v1/pool/mark-default/oracle` | Oracle triggers default on the pool |
-| 35 | `POST` | `/api/v1/waterfall/default-mode/admin` | Waterfall switches to recovery-only mode |
-| 36 | `POST` | `/api/v1/waterfall/deposit-payment` | Deposit partial recovery proceeds |
-| 37 | `POST` | `/api/v1/waterfall/run` | Only Senior receives distributions |
-| 38 | `GET`  | `/api/v1/waterfall` | Confirm `mezzOutstanding` and `juniorOutstanding` are unchanged |
-
----
-
-### Phase 7 — Maturity & Redemption
-
-Close out the pool and allow investors to burn their tranche tokens.
-
-| # | Method | Endpoint | Notes |
-|---|--------|----------|-------|
-| 39 | `POST` | `/api/v1/pool/update-performance` | Oracle reports `outstandingPrincipal: 0` |
-| 40 | `GET`  | `/api/v1/pool` | `poolStatus` auto-flips to `3` (Matured) |
-| 41 | `POST` | `/api/v1/tranches/melt/senior` | Investor A burns Senior tokens on redemption |
-| 42 | `POST` | `/api/v1/tranches/melt/mezz` | Investor A burns Mezz tokens |
-| 43 | `POST` | `/api/v1/tranches/melt/junior` | Investor B burns Junior tokens |
-| 44 | `POST` | `/api/v1/tranches/disable-minting` | Permanently disable all tranche minting |
-| 45 | `GET`  | `/api/v1/tranches` | Verify all minted amounts are `0` and minting is disabled |
-
----
-
-## Quick Reference — Lifecycle Summary
+Edit `.env`:
 
 ```
-[Deploy] ──► [Setup] ──► [KYC] ──► [Issuance] ──► [Servicing] ──► [Maturity]
-                                                         │
-                                              ┌──────────┴──────────┐
-                                           Turbo Mode          Default Mode
-                                        (accelerate)           (recovery)
+IOTA_NETWORK=localnet           # or testnet / mainnet
+SPV_REGISTRY_ID=0x<registry>   # from step 2
+SPV_PACKAGE_ID=0x<package>     # from step 2
+ADMIN_SECRET_KEY=iotaprivkey1…  # from step 0
+```
+
+```bash
+npm install
+npm run dev
+```
+
+Verify:
+```bash
+curl http://localhost:3000/health
+```
+
+---
+
+## Full Use Case Walkthrough
+
+The scenario below follows **GreenLend Capital**, an SPV that securitises a portfolio of
+US commercial real estate loans (total value **$10 million USDC**) into three risk tranches.
+Investors subscribe during a two-week window; repayments are distributed quarterly.
+
+All amounts are in USDC base units (6 decimals): `10_000_000 USDC = 10_000_000_000_000 units`.
+For brevity this example uses smaller numbers (`10_000_000_000` ≈ $10,000 USDC) and
+`0x2::iota::IOTA` as the stablecoin.
+
+---
+
+### Step 1 — Create the Pool
+
+One call deploys a fresh securitization package and atomically creates, wires, and activates
+the pool. If anything fails mid-way, the `SPVRegistry` is left untouched.
+
+```bash
+curl -X POST http://localhost:3000/pools \
+  -H "Content-Type: application/json" \
+  -d '{
+    "spv":            "0xSPV_ADDRESS",
+    "poolId":         "GREENLEND-CRE-2025-001",
+    "originator":     "0xORIGINATOR_ADDRESS",
+    "totalPoolValue": "10000000000",
+    "interestRate":   750,
+    "maturityDate":   1924992000000,
+    "assetHash":      "a3f1c2d4e5b6a7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2",
+    "oracleAddress":  "0xORACLE_ADDRESS",
+    "seniorSupplyCap":  "5000",
+    "mezzSupplyCap":    "3000",
+    "juniorSupplyCap":  "2000",
+    "seniorFaceValue":  "6000000000",
+    "mezzFaceValue":    "2500000000",
+    "juniorFaceValue":  "1500000000",
+    "seniorRateBps":    400,
+    "mezzRateBps":      700,
+    "juniorRateBps":    1500,
+    "paymentFrequency": 1,
+    "coinType":         "0x2::iota::IOTA"
+  }'
+```
+
+Field notes:
+- `interestRate` — blended pool rate in basis points (750 = 7.5%)
+- `maturityDate` — UNIX timestamp in ms (2031-01-01)
+- `assetHash` — SHA-256 hex of the off-chain loan agreement bundle
+- `seniorFaceValue` / `mezzFaceValue` / `juniorFaceValue` — principal allocated to each tranche; token price = `faceValue / supplyCap`
+- `seniorRateBps` / `mezzRateBps` / `juniorRateBps` — per-tranche waterfall distribution rates
+- `paymentFrequency` — `0` = Monthly, `1` = Quarterly
+
+Save the response IDs — you'll use them throughout:
+
+```json
+{
+  "poolStateId":             "0xPOOL",
+  "securitizationPackageId": "0xPKG",
+  "issuanceStateId":         "0xISSUANCE",
+  "vaultId":                 "0xVAULT"
+}
+```
+
+Verify on-chain:
+```bash
+curl http://localhost:3000/registry/pools/0xPOOL | jq '{status: .pool.status, issuanceActive: .issuance.issuanceActive}'
+# → {"status":"Active","issuanceActive":false}
+```
+
+---
+
+### Step 2 — KYC Investors
+
+Before the subscription window opens, whitelist investors in `ComplianceRegistry`.
+Deploy one via `iota client publish packages/spv` (or use an existing one).
+
+```bash
+COMPLIANCE_REG_ID=0xCOMPLIANCE_REGISTRY
+
+# Whitelist Alice (institutional investor, 90-day holding period)
+curl -X POST http://localhost:3000/compliance/$COMPLIANCE_REG_ID/investors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "investor":           "0xALICE_ADDRESS",
+    "accreditationLevel": 3,
+    "jurisdiction":       "US",
+    "didObjectId":        "0xALICE_DID",
+    "customHoldingMs":    7776000000
+  }'
+
+# Whitelist Bob (professional investor, default holding period)
+curl -X POST http://localhost:3000/compliance/$COMPLIANCE_REG_ID/investors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "investor":           "0xBOB_ADDRESS",
+    "accreditationLevel": 2,
+    "jurisdiction":       "GB",
+    "didObjectId":        "0xBOB_DID",
+    "customHoldingMs":    0
+  }'
+```
+
+Verify Alice:
+```bash
+curl http://localhost:3000/compliance/$COMPLIANCE_REG_ID/investor/0xALICE_ADDRESS | jq .
+# → {"whitelisted":true,"accreditationLevel":3,"jurisdiction":"US",...}
+```
+
+Check if a transfer between them is currently allowed:
+```bash
+curl "http://localhost:3000/compliance/$COMPLIANCE_REG_ID/transfer-check?from=0xALICE_ADDRESS&to=0xBOB_ADDRESS" | jq .
+# → {"allowed":false,"issues":["Sender in holding period"]}  (holding period just started)
+```
+
+---
+
+### Step 3 — Open the Subscription Window
+
+```bash
+NOW_MS=$(date +%s%3N)
+SALE_START=$(( NOW_MS + 60000 ))          # 1 minute from now
+SALE_END=$(( NOW_MS + 60000 + 1209600000 )) # + 14 days
+
+curl -X POST http://localhost:3000/pools/0xPOOL/issuance/start \
+  -H "Content-Type: application/json" \
+  -d "{\"saleStart\": $SALE_START, \"saleEnd\": $SALE_END}"
+# → {"digest":"0x..."}
+```
+
+Check state:
+```bash
+curl http://localhost:3000/registry/pools/0xPOOL/issuance | jq '{issuanceActive, prices}'
+# → {"issuanceActive":true,"prices":{"senior":"1200000","mezz":"833333","junior":"750000"}}
+```
+
+---
+
+### Step 4 — Investors Subscribe
+
+The signer's wallet pays stablecoin; tranche tokens are minted directly to the investor.
+
+```bash
+# Alice buys 10 Senior tokens (10 × 1,200,000 = 12,000,000 units)
+curl -X POST http://localhost:3000/pools/0xPOOL/issuance/invest \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"trancheType\":          0,
+    \"amount\":               \"12000000\",
+    \"complianceRegistryId\": \"$COMPLIANCE_REG_ID\"
+  }"
+
+# Bob buys 5 Mezzanine tokens (5 × 833,333 = 4,166,665 units)
+curl -X POST http://localhost:3000/pools/0xPOOL/issuance/invest \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"trancheType\":          1,
+    \"amount\":               \"4166665\",
+    \"complianceRegistryId\": \"$COMPLIANCE_REG_ID\"
+  }"
+```
+
+- `trancheType`: `0` = Senior, `1` = Mezzanine, `2` = Junior
+
+Check minted supply:
+```bash
+curl http://localhost:3000/registry/pools/0xPOOL/tranches | jq '{seniorMinted, mezzMinted, totalRaised}'
+```
+
+---
+
+### Step 5 — Close Issuance and Release Funds to Vault
+
+After the sale window closes (or early if fully subscribed):
+
+```bash
+# Close the subscription window
+curl -X POST http://localhost:3000/pools/0xPOOL/issuance/end
+# → {"digest":"0x..."}
+
+# Move raised funds from IssuanceState into the PaymentVault
+curl -X POST http://localhost:3000/pools/0xPOOL/issuance/release
+# → {"digest":"0x..."}
+```
+
+Verify vault balance:
+```bash
+curl http://localhost:3000/vault/0xVAULT | jq .
+# → {"balance":"16166665","totalDeposited":"16166665","totalDistributed":"0"}
+```
+
+---
+
+### Step 6 — Quarterly Repayment Cycle
+
+GreenLend's borrowers make their first quarterly repayment. The operator records it and
+runs the waterfall to distribute to tranche holders in strict seniority order.
+
+```bash
+# Record a repayment of 500,000 units into the waterfall
+curl -X POST http://localhost:3000/pools/0xPOOL/waterfall/deposit \
+  -H "Content-Type: application/json" \
+  -d '{"amount": "500000"}'
+
+# Accrue interest since last distribution
+curl -X POST http://localhost:3000/pools/0xPOOL/waterfall/accrue
+
+# Run the waterfall: Senior paid first, then Mezz, then Junior, surplus to reserve
+curl -X POST http://localhost:3000/pools/0xPOOL/waterfall/run
+```
+
+Check post-waterfall state:
+```bash
+curl http://localhost:3000/registry/pools/0xPOOL/waterfall | jq \
+  '{seniorOutstanding, mezzOutstanding, juniorOutstanding, reserveAccount, pendingFunds}'
+```
+
+Repeat each quarter: `deposit → accrue → run`.
+
+---
+
+### Step 7 — Turbo Mode (Optional Early Repayment)
+
+If the borrower makes a large prepayment and the SPV wants to accelerate principal
+reduction on all tranches:
+
+```bash
+curl -X POST http://localhost:3000/pools/0xPOOL/waterfall/turbo
+# Waterfall mode → Turbo; principal now repaid proportionally across all tranches
+```
+
+---
+
+### Step 8 — Default Scenario (Optional)
+
+If the borrower stops paying, the SPV or oracle triggers default:
+
+```bash
+curl -X POST http://localhost:3000/pools/0xPOOL/default
+# Pool status → Defaulted; waterfall mode → Default (recovery priority)
+```
+
+In Default mode the waterfall still distributes whatever funds arrive,
+Senior tranche retains priority.
+
+---
+
+### Step 9 — Mature the Pool
+
+Once all outstanding principal is repaid (or by contractual maturity date):
+
+```bash
+curl -X POST http://localhost:3000/pools/0xPOOL/close
+# Pool status → Matured; no further repayments accepted
+```
+
+---
+
+## Lifecycle Summary
+
+```
+POST /pools
+  ├─ tx 1: deploy securitization package
+  └─ tx 2: atomic PTB → create + wire + activate (SPVRegistry updated only on success)
+       ↓
+  Pool: Active
+
+POST /compliance/:regId/investors     ← KYC investors any time before issuance
+       ↓
+POST /pools/:id/issuance/start        ← open subscription window
+POST /pools/:id/issuance/invest       ← investors buy tranche tokens (repeatable)
+POST /pools/:id/issuance/end          ← close window
+POST /pools/:id/issuance/release      ← move raised funds to PaymentVault
+       ↓
+  [Quarterly cycle]
+POST /pools/:id/waterfall/deposit     ← record repayment from borrower
+POST /pools/:id/waterfall/accrue      ← accrue interest
+POST /pools/:id/waterfall/run         ← distribute Senior → Mezz → Junior → Reserve
+       ↓
+  [Optional]
+POST /pools/:id/waterfall/turbo       ← accelerate principal repayment
+POST /pools/:id/default               ← trigger default (Pool → Defaulted)
+       ↓
+POST /pools/:id/close                 ← Pool → Matured
 ```
 
 | Phase | Pool Status | Waterfall Mode |
 |-------|-------------|----------------|
-| 1 — Setup | `Created → Active` | — |
-| 2 — KYC | `Active` | — |
-| 3 — Issuance | `Active` | — |
-| 4 — Servicing | `Active` | Normal |
-| 5 — Turbo | `Active` | Turbo |
-| 6 — Default | `Defaulted` | Default |
-| 7 — Maturity | `Matured` | — |
+| Creation | `Created → Active` | — |
+| KYC / Issuance | `Active` | — |
+| Servicing | `Active` | Normal |
+| Accelerated repayment | `Active` | Turbo |
+| Recovery | `Defaulted` | Default |
+| Fully repaid | `Matured` | — |
 
-# Last deployment 
-## Testnet
-```bash 
-======================================
-DEPLOYMENT SUCCESSFUL
-======================================
-Network:               testnet
-Transaction Digest:    6eAhSCNhFduBETwBF12rPA26qsNPHCNtrEgMQVgjDuaM
-Package ID:            0x94830d7f4f8f3a1cd7e41456c8d189b9ebcfcb30ce131a21a78af15322ffa468
-Output File:           deployments/publish_testnet_20260310_111343.json
+---
 
-Created Objects:
---------------------------------------
-0x08d3c6464c39a53720f3cfd02b7c7fcc8301d8e1eecf1d0fd78824ce8774fcb8  (MEZZ_COIN>)
-0x1d704430cbb468fa2a4337e77993f09a23974b19b601961ec5f1e4b38adc44ee  (WaterfallAdminCap)
-0x38dd24458fbc7961a6e97b2ad1dd1288334b49f1cfd4dc1947f7a3184dc0a7ac  (VaultAdminCap)
-0x4f8f0302066d9c5ce52edce97b72ecc9551fe6df8fc2835adfb36c08a3d222a9  (ComplianceAdminCap)
-0x5d5412e329d525d734874748cd31278a43aa7ef7386ff7b208e4e6221d3b1006  (SENIOR_COIN>)
-0x648d438e1c5793bcecf1fcda7e1e81195b20718fd5589b42e7f6edd7dd595620  (SeniorTreasury)
-0x7656909ee1803eb6e8a755ba03a19755f3c0f3268b480df1dc83d3bbbd579743  (AdminCap)
-0x7993a6ebb797318be3c120535b0681f818009b9ce7bcb05461a94723cf3bd5b5  (JuniorTreasury)
-0x8fc339ca7536a4a4561edf51f09554611b237e5fb59191b82527626dcbe7dc2f  (ComplianceRegistry)
-0x9578e17217ec86a370c226ab932411a56b481e0439e7c9b2ce1cc3b1c57b5ba4  (TrancheAdminCap)
-0x9d3301cfabb2edf33192b6b78a362a0ab55064fdc8ec8b77c2a1576645aa86ae  (WaterfallState)
-0xa94ccf119bf93883d7bb8e824e9c418cf7d32ad771775f2daf67a8c14eec73bb  (TrancheRegistry)
-0xb46f455cffc1a0e8d367571796c31d7fba170a18e7f0ef92ea16d5811cd3a912  (MezzTreasury)
-0xbe4ecded29499b3227c5b681fba7fb04348bff28f5e3ae9bcb9d830fde60506a  (IssuanceOwnerCap)
-0xc9e15ee8498adf178f37c4a4097523205df09925d4b0ea197c3df7c8480336ff  (UpgradeCap)
-0xd2aa5176cab327a0f9fbe94d0d395543c95f6affd4dca4e69ccf65e8a90c05ba  (JUNIOR_COIN>)
-0xd43d9183e5ae130170fc703d8ef0bc4334d18f15f53ea0f609110b3b9f589e4c  (PoolState)
+## Multiple Pools
 
-Updated Objects:
---------------------------------------
-0x13e9eee5e66fe53e38c9c59e700088e4f16f5ed74e35ffce0524010d1e12fe19  (IOTA>)
+Each `POST /pools` call deploys its own `securitizationPackageId`. Pools are completely
+self-contained — different stablecoins, different maturities, different tranche ratios.
+The `SPVRegistry` is the single enumeration point for all pools:
+
+```bash
+curl http://localhost:3000/registry/pools        # all pools
+curl http://localhost:3000/registry/spv/0xSPV/pools  # pools owned by a specific SPV
 ```
 
+---
 
+See `api/README.md` for the full API reference.
