@@ -55,6 +55,7 @@ interface RawTrancheRegistry {
 
 interface RawIssuanceState {
   pool_obj_id:           string;
+  vault_obj_id:          string;
   price_per_unit_senior: string;
   price_per_unit_mezz:   string;
   price_per_unit_junior: string;
@@ -149,7 +150,8 @@ export interface IssuanceInfo {
   totalRaised:    bigint;
   saleStart:      Date | null;
   saleEnd:        Date | null;
-  prices: { senior: bigint; mezz: bigint; junior: bigint };
+  prices:         { senior: bigint; mezz: bigint; junior: bigint };
+  vaultObjId:     string;
 }
 
 export interface WaterfallInfo {
@@ -268,6 +270,7 @@ export class RegistryService {
         mezz:   BigInt(raw.price_per_unit_mezz),
         junior: BigInt(raw.price_per_unit_junior),
       },
+      vaultObjId: raw.vault_obj_id,
     };
   }
 

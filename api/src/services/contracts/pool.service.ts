@@ -239,6 +239,7 @@ export async function createTranches(params: CreateTranchesParams): Promise<stri
 export interface CreateIssuanceStateParams {
   issuanceOwnerCapId:       string;
   poolObjId:                string;
+  vaultObjId:               string;
   priceSenior:              bigint;
   priceMezz:                bigint;
   priceJunior:              bigint;
@@ -257,7 +258,8 @@ export async function createIssuanceState(
     typeArguments:   [params.coinType],
     arguments: [
       txb.object(params.issuanceOwnerCapId),
-      txb.pure.address(params.poolObjId),  // ID passed as address
+      txb.pure.address(params.poolObjId),    // ID passed as address
+      txb.pure.address(params.vaultObjId),   // ID passed as address
       txb.pure.u64(params.priceSenior),
       txb.pure.u64(params.priceMezz),
       txb.pure.u64(params.priceJunior),

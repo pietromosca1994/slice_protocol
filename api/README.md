@@ -108,7 +108,25 @@ Returns full pool detail including tranches, issuance state, and waterfall state
 Returns TrancheRegistry state for the pool.
 
 #### `GET /registry/pools/:poolObjId/issuance`
-Returns IssuanceState for the pool.
+Returns IssuanceState for the pool, including the linked vault object ID.
+
+```json
+{
+  "issuanceActive": false,
+  "issuanceEnded":  true,
+  "succeeded":      true,
+  "totalRaised":    "10000000000",
+  "saleStart":      "2025-01-01T00:00:00.000Z",
+  "saleEnd":        "2025-02-01T00:00:00.000Z",
+  "prices": { "senior": "1000000", "mezz": "1000000", "junior": "1000000" },
+  "vaultObjId":     "0x..."
+}
+```
+
+`vaultObjId` is the object ID of the `PaymentVault` that receives proceeds when
+`POST /pools/:id/issuance/release` is called. It matches `contractObjects.paymentVaultObj`
+on the parent pool and is enforced on-chain — passing the wrong vault to the release call
+aborts with error `3010`.
 
 #### `GET /registry/pools/:poolObjId/waterfall`
 Returns WaterfallState for the pool.
@@ -179,10 +197,14 @@ Response (HTTP 201):
 #### Pool lifecycle
 
 ```
-POST /pools/:id/activate    Created → Active
+POST /pools/:id/activate    Created → Active  (only for pools not created via POST /pools)
 POST /pools/:id/default     Active → Defaulted
 POST /pools/:id/close       Active|Defaulted → Matured
 ```
+
+> Pools created via `POST /pools` are born **Active** — the `/activate` endpoint is only needed
+> for pools left in `Created` state by a direct `create_pool` contract call. Calling it on an
+> already-Active pool returns HTTP 409.
 
 #### Issuance
 
@@ -190,18 +212,21 @@ POST /pools/:id/close       Active|Defaulted → Matured
 POST /pools/:id/issuance/start    Open subscription window
 POST /pools/:id/issuance/invest   Submit an investment (signer pays)
 POST /pools/:id/issuance/end      Close subscription window
+POST /pools/:id/issuance/release  Move raised funds from IssuanceState → PaymentVault
 ```
 
 ##### `POST /pools/:id/issuance/start` body
 ```json
 {
-  "saleStart": 1700000000000,
-  "saleEnd":   1702000000000
+  "saleStart": 1773700000000,
+  "saleEnd":   1774900000000
 }
 ```
 
-`saleStart`/`saleEnd` are Unix timestamps in milliseconds. Prices are fixed at pool creation
-time (via `POST /pools`) and stored on-chain in `IssuanceState` — they cannot be changed here.
+`saleStart`/`saleEnd` are **Unix timestamps in milliseconds** — not seconds. Both must be in
+the future relative to the on-chain clock; `saleEnd` must exceed `saleStart`. The API validates
+these constraints before sending the transaction (HTTP 400 with a clear message on failure).
+Prices are fixed at pool creation time and stored on-chain — they cannot be changed here.
 The `IssuanceState` object is resolved automatically from the pool.
 
 ##### `POST /pools/:id/issuance/invest` body
@@ -219,6 +244,11 @@ The `IssuanceState` object is resolved automatically from the pool.
 
 The coin type is derived automatically from the on-chain `IssuanceState` type — no need to
 specify it. The `TrancheRegistry` and `IssuanceState` objects are resolved from the pool.
+
+##### `POST /pools/:id/issuance/release` — no body required
+
+Moves all raised stablecoin from `IssuanceState` into `PaymentVault`. Requires issuance to have
+ended and succeeded (`issuanceEnded: true`). The coin type is derived automatically.
 
 #### Waterfall
 
@@ -329,22 +359,28 @@ Returns vault balance and accounting totals (all values as strings to preserve p
 
 ```
 POST /pools
-  │  tx 1: deploy securitization package
-  │  tx 2: atomic PTB — create pool + issuance + vault, wire contracts, activate
-  ▼
-pool is Active — securitizationPackageId stored in SPVRegistry per pool
+  ├─ tx 1: deploy securitization package
+  └─ tx 2: atomic PTB — create pool + issuance + vault, wire contracts, activate
+       ↓
+  Pool: Active
 
-POST /pools/:id/issuance/start   → subscription window opens
-POST /pools/:id/issuance/invest  → investor subscribes (signer's wallet pays)
-POST /pools/:id/issuance/end     → subscription window closes
-
-POST /compliance/:regId/investors  → whitelist investors (can be done anytime before issuance)
-
-POST /pools/:id/waterfall/deposit  → record repayment
-POST /pools/:id/waterfall/accrue   → accrue interest
-POST /pools/:id/waterfall/run      → distribute (Senior → Mezz → Junior → Reserve)
-
-POST /pools/:id/close              → pool Matured
+POST /compliance/:regId/investors     ← KYC investors (any time before issuance)
+       ↓
+POST /pools/:id/issuance/start        ← open subscription window (set saleStart / saleEnd)
+POST /pools/:id/issuance/invest       ← investor subscribes (repeatable, signer's wallet pays)
+POST /pools/:id/issuance/end          ← close subscription window
+POST /pools/:id/issuance/release      ← transfer raised funds to PaymentVault
+       ↓
+  [Quarterly / monthly cycle]
+POST /pools/:id/waterfall/deposit     ← record borrower repayment
+POST /pools/:id/waterfall/accrue      ← accrue interest
+POST /pools/:id/waterfall/run         ← distribute (Senior → Mezz → Junior → Reserve)
+       ↓
+  [Optional]
+POST /pools/:id/waterfall/turbo       ← Normal → Turbo (accelerated repayment)
+POST /pools/:id/default               ← Active → Defaulted
+       ↓
+POST /pools/:id/close                 ← Pool → Matured
 ```
 
 ---

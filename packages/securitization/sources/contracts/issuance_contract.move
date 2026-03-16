@@ -59,6 +59,8 @@ module securitization::issuance_contract {
         id:                    UID,
         /// Object ID of the `PoolState` this issuance belongs to.
         pool_obj_id:           ID,
+        /// Object ID of the `VaultBalance` that receives proceeds on release.
+        vault_obj_id:          ID,
         price_per_unit_senior: u64,
         price_per_unit_mezz:   u64,
         price_per_unit_junior: u64,
@@ -103,6 +105,7 @@ module securitization::issuance_contract {
     public entry fun create_issuance_state<C>(
         _cap:         &IssuanceOwnerCap,
         pool_obj_id:  ID,
+        vault_obj_id: ID,
         price_senior: u64,
         price_mezz:   u64,
         price_junior: u64,
@@ -115,6 +118,7 @@ module securitization::issuance_contract {
         let state = IssuanceState<C> {
             id:                    object::new(ctx),
             pool_obj_id,
+            vault_obj_id,
             price_per_unit_senior: price_senior,
             price_per_unit_mezz:   price_mezz,
             price_per_unit_junior: price_junior,
@@ -135,6 +139,7 @@ module securitization::issuance_contract {
     public fun create_issuance_state_unsealed<C>(
         _cap:         &IssuanceOwnerCap,
         pool_obj_id:  ID,
+        vault_obj_id: ID,
         price_senior: u64,
         price_mezz:   u64,
         price_junior: u64,
@@ -147,6 +152,7 @@ module securitization::issuance_contract {
         IssuanceState<C> {
             id:                    object::new(ctx),
             pool_obj_id,
+            vault_obj_id,
             price_per_unit_senior: price_senior,
             price_per_unit_mezz:   price_mezz,
             price_per_unit_junior: price_junior,
@@ -322,10 +328,11 @@ module securitization::issuance_contract {
         vault: &mut VaultBalance<C>,
         clock: &Clock,
     ) {
-        assert!(state.issuance_ended, errors::issuance_not_active());
-        assert!(state.succeeded,      errors::refund_not_permitted());
+        assert!(state.issuance_ended,                                 errors::issuance_not_active());
+        assert!(state.succeeded,                                      errors::refund_not_permitted());
+        assert!(payment_vault::object_id(vault) == state.vault_obj_id, errors::wrong_vault());
         let total = balance::value(&state.vault_balance);
-        assert!(total > 0,            errors::no_subscription());
+        assert!(total > 0,                                            errors::no_subscription());
         let funds = balance::split(&mut state.vault_balance, total);
         payment_vault::receive_balance(vault, funds, clock);
     }
@@ -333,6 +340,7 @@ module securitization::issuance_contract {
     // ─── Read-only accessors ──────────────────────────────────────────────────
 
     public fun pool_obj_id<C>(s: &IssuanceState<C>): ID          { s.pool_obj_id }
+    public fun vault_obj_id<C>(s: &IssuanceState<C>): ID         { s.vault_obj_id }
     public fun total_raised<C>(s: &IssuanceState<C>): u64        { s.total_raised }
     public fun issuance_active<C>(s: &IssuanceState<C>): bool    { s.issuance_active }
     public fun issuance_ended<C>(s: &IssuanceState<C>): bool     { s.issuance_ended }

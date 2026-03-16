@@ -64,6 +64,8 @@ module securitization::errors {
     const EIssuanceAlreadyEnded: u64      = 3008;
     /// Pool is not in Active status
     const EPoolNotActive: u64             = 3009;
+    /// Vault passed to release_funds_to_vault does not match the stored vault_obj_id
+    const EWrongVault: u64                = 3010;
 
     // ── WaterfallEngine errors ────────────────────────────────────────────────
     /// No distributable funds available
@@ -108,6 +110,7 @@ module securitization::errors {
     public fun investor_not_verified(): u64      { EInvestorNotVerified }
     public fun issuance_already_ended(): u64     { EIssuanceAlreadyEnded }
     public fun pool_not_active(): u64            { EPoolNotActive }
+    public fun wrong_vault(): u64                { EWrongVault }
 
     public fun no_funds_available(): u64         { ENoFundsAvailable }
     public fun already_in_mode(): u64            { EAlreadyInMode }

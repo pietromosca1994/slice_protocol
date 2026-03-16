@@ -9,9 +9,19 @@ issuanceContractRouter.use(requireWriteAccess);
 
 // ── Schemas ────────────────────────────────────────────────────────────────────
 
+const MIN_MS_TIMESTAMP = 1_000_000_000_000; // < this looks like seconds, not ms
+
 const StartIssuanceSchema = z.object({
-  saleStart: z.number().int().positive(),
-  saleEnd:   z.number().int().positive(),
+  saleStart: z.number().int().positive()
+    .refine(v => v >= MIN_MS_TIMESTAMP, { message: "saleStart must be a Unix timestamp in milliseconds (≥ 1_000_000_000_000)" }),
+  saleEnd: z.number().int().positive()
+    .refine(v => v >= MIN_MS_TIMESTAMP, { message: "saleEnd must be a Unix timestamp in milliseconds (≥ 1_000_000_000_000)" }),
+}).refine(b => b.saleEnd > b.saleStart, {
+  message: "saleEnd must be greater than saleStart",
+  path: ["saleEnd"],
+}).refine(b => b.saleEnd > Date.now(), {
+  message: "saleEnd is in the past — use a future Unix timestamp in milliseconds",
+  path: ["saleEnd"],
 });
 
 const InvestSchema = z.object({

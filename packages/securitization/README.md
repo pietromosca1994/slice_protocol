@@ -249,9 +249,10 @@ All abort codes are namespaced by contract to make on-chain traces immediately d
 | 1xxx | PoolContract |
 | 2xxx | TrancheFactory |
 | 3xxx | IssuanceContract |
-| 4xxx | ComplianceRegistry |
-| 5xxx | PaymentVault |
-| 6xxx | WaterfallEngine |
+| 4xxx | WaterfallEngine |
+| 5xxx | ComplianceRegistry (spv package) |
+| 6xxx | PaymentVault (spv package) |
+| 7xxx | SPVRegistry (spv package) |
 
 ---
 
@@ -337,177 +338,18 @@ iota move test --filter test_activate_pool_success
 
 ## Deployment
 
-```bash
-./scripts/deploy_securitization.sh testnet   # or mainnet
-```
+Pool creation is fully handled by the API (`POST /pools`). It runs two transactions:
 
-The script publishes the package and saves a JSON manifest to `deployments/`.
+1. **Deploy** — publishes this package; bootstraps `TrancheRegistry` with `TreasuryCap` objects.
+2. **Atomic PTB** — in a single programmable transaction:
+   - Creates `PoolState`, `IssuanceState<C>`, and `VaultBalance<C>` by value (not yet shared)
+   - Calls `set_contracts`, `create_tranches`, `set_contract_objects`, `initialise_pool`, `initialise_waterfall`
+   - Calls `activate_and_register_pool` — activates the pool, registers in `SPVRegistry`, and shares all objects atomically
 
-### Mandatory post-deployment sequence
+If any step in the PTB fails, the entire transaction rolls back and `SPVRegistry` is never updated.
 
-The order below is **not optional** — each step creates objects or capabilities that the next step depends on.
+See the [root README](../../README.md) for the full setup and use-case walkthrough.
 
-```
-Step 1 — set_contracts
-  Sets oracle_address on PoolState BEFORE initialise_pool is called.
-  If skipped, the OracleCap will be minted to @0x0 and permanently lost.
-
-Step 2 — initialise_pool
-  Stores pool parameters and mints OracleCap → oracle_address.
-
-Step 3 — tranches/bootstrap
-  Extracts TreasuryCaps from SeniorTreasury / MezzTreasury / JuniorTreasury
-  into TrancheRegistry. Must happen before create_tranches.
-
-Step 4 — tranches/create_tranches
-  Sets supply caps, enables minting, sends IssuanceAdminCap → issuance_contract.
-
-Step 5 — vault/create_vault
-  Creates the shared VaultBalance<C> object for the chosen stablecoin.
-
-Step 6 — vault/authorise_depositor
-  Grants deposit rights to the IssuanceContract address.
-
-Step 7 — issuance/create_issuance_state
-  Creates the shared IssuanceState<C> object.
-
-Step 8 — pool/activate_pool
-  Transitions pool Created → Active. Requires steps 1–2 and non-zero
-  tranche_factory, issuance_contract, waterfall_engine addresses.
-
-Step 9 — waterfall/initialise_waterfall
-  Sets per-tranche outstanding amounts and interest rates.
-  Mints PoolCap → pool_contract_addr.
-```
-
-### PTB examples
-
-```bash
-# Step 1 — link contracts
-iota client ptb \
-  --move-call <PKG>::pool_contract::set_contracts \
-    @<ADMIN_CAP> @<POOL_STATE> \
-    @<TRANCHE_REGISTRY> @<ISSUANCE_STATE> @<WATERFALL_STATE> @<ORACLE_ADDR>
-
-# Step 2 — initialise pool
-iota client ptb \
-  --move-call <PKG>::pool_contract::initialise_pool \
-    @<ADMIN_CAP> @<POOL_STATE> \
-    '"POOL-001"' @<ORIGINATOR> @<SPV> \
-    10000000000u64 500u32 1893456000000u64 \
-    '<ASSET_HASH_HEX_32_BYTES>' @<CLOCK>
-
-# Step 3 — bootstrap tranche treasuries
-iota client ptb \
-  --move-call <PKG>::tranche_factory::bootstrap \
-    @<TRANCHE_ADMIN_CAP> @<TRANCHE_REGISTRY> \
-    @<SENIOR_TREASURY> @<MEZZ_TREASURY> @<JUNIOR_TREASURY>
-
-# Step 4 — create tranches (supply caps in token base units)
-iota client ptb \
-  --move-call <PKG>::tranche_factory::create_tranches \
-    @<TRANCHE_ADMIN_CAP> @<TRANCHE_REGISTRY> \
-    5000000000u64 3000000000u64 2000000000u64 \
-    @<ISSUANCE_STATE> @<CLOCK>
-
-# Step 5 — create vault
-iota client ptb \
-  --move-call <PKG>::payment_vault::create_vault<0x<STABLECOIN_PKG>::usdc::USDC> \
-    @<VAULT_ADMIN_CAP>
-
-# Step 6 — authorise issuance contract as depositor
-iota client ptb \
-  --move-call <PKG>::payment_vault::authorise_depositor<...USDC> \
-    @<VAULT_ADMIN_CAP> @<VAULT_BALANCE> @<ISSUANCE_STATE> @<CLOCK>
-
-# Step 7 — create issuance state
-iota client ptb \
-  --move-call <PKG>::issuance_contract::create_issuance_state<...USDC> \
-    @<ISSUANCE_OWNER_CAP>
-
-# Step 8 — activate pool
-iota client ptb \
-  --move-call <PKG>::pool_contract::activate_pool \
-    @<ADMIN_CAP> @<POOL_STATE> @<CLOCK>
-
-# Step 9 — initialise waterfall (rates in basis points, frequency 0=monthly 1=quarterly)
-iota client ptb \
-  --move-call <PKG>::waterfall_engine::initialise_waterfall \
-    @<WATERFALL_ADMIN_CAP> @<WATERFALL_STATE> \
-    5000000000u64 3000000000u64 2000000000u64 \
-    300u32 600u32 1200u32 \
-    0u8 @<POOL_STATE> @<CLOCK>
-```
-
----
-
-## Full Lifecycle: End-to-End Call Sequence
-
-### Phase 1 — Setup (steps 1–9 above)
-
-### Phase 2 — KYC / Investor Onboarding
-
-```bash
-# Set a 90-day default holding period for all new investors
-POST /api/v1/compliance/default-holding-period  { "holdingPeriodMs": "7776000000" }
-
-# Whitelist two investors
-POST /api/v1/compliance/investors  { investor, accreditationLevel: 3, jurisdiction: "US", ... }
-POST /api/v1/compliance/investors  { investor, accreditationLevel: 2, jurisdiction: "DE", ... }
-
-# Verify
-GET  /api/v1/compliance/investor/:address
-```
-
-### Phase 3 — Primary Issuance
-
-```bash
-POST /api/v1/issuance/start      # open subscription window with per-tranche prices
-POST /api/v1/issuance/invest     # investor A buys Senior  (trancheType: 0)
-POST /api/v1/issuance/invest     # investor A buys Mezz    (trancheType: 1)
-POST /api/v1/issuance/invest     # investor B buys Junior  (trancheType: 2)
-GET  /api/v1/tranches/0          # verify Senior minted amount
-POST /api/v1/issuance/end        # close window
-POST /api/v1/issuance/release-to-vault   # move raised funds to PaymentVault
-GET  /api/v1/vault/:vaultId      # verify balance = total raised
-```
-
-### Phase 4 — Ongoing Servicing (repeat each payment period)
-
-```bash
-POST /api/v1/pool/update-performance    # oracle reports repayment
-POST /api/v1/waterfall/deposit-payment  # record amount into pending funds
-POST /api/v1/waterfall/run              # execute waterfall: Senior → Mezz → Junior
-GET  /api/v1/waterfall                  # verify outstanding principals reduced
-```
-
-### Phase 5 — Stress: Turbo Mode
-
-```bash
-POST /api/v1/waterfall/turbo-mode       # activate — excess cash now accelerates Senior paydown
-POST /api/v1/waterfall/deposit-payment  # larger repayment
-POST /api/v1/waterfall/run              # senior_outstanding drops faster than normal
-```
-
-### Phase 6 — Stress: Default
-
-```bash
-POST /api/v1/pool/mark-default/oracle        # oracle triggers default
-POST /api/v1/waterfall/default-mode/admin    # waterfall enters recovery mode
-POST /api/v1/waterfall/deposit-payment       # partial recovery proceeds
-POST /api/v1/waterfall/run                   # only Senior receives distributions
-```
-
-### Phase 7 — Maturity & Redemption
-
-```bash
-POST /api/v1/pool/update-performance   # oracle: outstanding_principal = 0
-GET  /api/v1/pool                      # poolStatus auto-flips to 3 (Matured)
-POST /api/v1/tranches/melt/senior      # investors burn tokens on redemption
-POST /api/v1/tranches/melt/mezz
-POST /api/v1/tranches/melt/junior
-POST /api/v1/tranches/disable-minting  # permanently close the tranche
-```
 
 ---
 

@@ -246,7 +246,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"saleStart\": 1700000000000,\n  \"saleEnd\": 1702000000000\n}",
+              "raw": "{\n  \"saleStart\": 1773700000000,\n  \"saleEnd\": 1774900000000\n}",
               "options": {
                 "raw": {
                   "language": "json"

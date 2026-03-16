@@ -11,4 +11,4 @@ spv  = { local = "../spv" }
  
 [addresses]
 securitization = "0x0"
-spv            = "0x1"
+spv = "0x1"

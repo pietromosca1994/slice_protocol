@@ -5,7 +5,7 @@
 ///  - start_issuance: happy path, pool-binding guard, invalid window guard
 ///  - end_issuance: happy path, not-active guard
 ///  - invest: happy path (all three tranches), not-whitelisted abort
-///  - release_funds_to_vault: happy path, insufficient funds guard
+///  - release_funds_to_vault: happy path, wrong-vault abort
 #[test_only, allow(unused_use, unused_variable, unused_const, duplicate_alias, unused_function, lint(self_transfer))]
 module securitization::issuance_contract_tests {
     use iota::test_scenario::{Self as ts, Scenario};
@@ -130,13 +130,17 @@ module securitization::issuance_contract_tests {
         pool_obj_id
     }
 
-    /// Create IssuanceState bound to pool_obj_id.
-    fun create_issuance_state_helper(scenario: &mut Scenario, pool_obj_id: iota::object::ID) {
+    /// Create IssuanceState bound to pool_obj_id and vault_obj_id.
+    fun create_issuance_state_helper(
+        scenario:    &mut Scenario,
+        pool_obj_id: iota::object::ID,
+        vault_obj_id: iota::object::ID,
+    ) {
         ts::next_tx(scenario, ADMIN);
         {
             let cap = ts::take_from_sender<IssuanceOwnerCap>(scenario);
             issuance_contract::create_issuance_state<IOTA>(
-                &cap, pool_obj_id,
+                &cap, pool_obj_id, vault_obj_id,
                 PRICE_SENIOR, PRICE_MEZZ, PRICE_JUNIOR,
                 ts::ctx(scenario),
             );
@@ -173,12 +177,13 @@ module securitization::issuance_contract_tests {
         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
         setup_issuance(&mut scenario);
 
-        let pool_id = object::id_from_address(@0xBB);
+        let pool_id  = object::id_from_address(@0xBB);
+        let vault_id = object::id_from_address(@0xCC);
         ts::next_tx(&mut scenario, ADMIN);
         {
             let cap = ts::take_from_sender<IssuanceOwnerCap>(&scenario);
             issuance_contract::create_issuance_state<IOTA>(
-                &cap, pool_id,
+                &cap, pool_id, vault_id,
                 PRICE_SENIOR, PRICE_MEZZ, PRICE_JUNIOR,
                 ts::ctx(&mut scenario),
             );
@@ -188,13 +193,14 @@ module securitization::issuance_contract_tests {
         ts::next_tx(&mut scenario, ADMIN);
         {
             let state = ts::take_shared<IssuanceState<IOTA>>(&scenario);
-            assert!(issuance_contract::price_senior(&state) == PRICE_SENIOR, 0);
-            assert!(issuance_contract::price_mezz(&state)   == PRICE_MEZZ,   1);
-            assert!(issuance_contract::price_junior(&state) == PRICE_JUNIOR, 2);
-            assert!(issuance_contract::pool_obj_id(&state)  == pool_id,      3);
-            assert!(!issuance_contract::issuance_active(&state),             4);
-            assert!(!issuance_contract::issuance_ended(&state),              5);
-            assert!(issuance_contract::total_raised(&state) == 0,            6);
+            assert!(issuance_contract::price_senior(&state)  == PRICE_SENIOR, 0);
+            assert!(issuance_contract::price_mezz(&state)    == PRICE_MEZZ,   1);
+            assert!(issuance_contract::price_junior(&state)  == PRICE_JUNIOR, 2);
+            assert!(issuance_contract::pool_obj_id(&state)   == pool_id,      3);
+            assert!(issuance_contract::vault_obj_id(&state)  == vault_id,     4);
+            assert!(!issuance_contract::issuance_active(&state),              5);
+            assert!(!issuance_contract::issuance_ended(&state),               6);
+            assert!(issuance_contract::total_raised(&state) == 0,             7);
             ts::return_shared(state);
         };
 
@@ -213,7 +219,7 @@ module securitization::issuance_contract_tests {
         {
             let cap = ts::take_from_sender<IssuanceOwnerCap>(&scenario);
             issuance_contract::create_issuance_state<IOTA>(
-                &cap, object::id_from_address(@0xBB),
+                &cap, object::id_from_address(@0xBB), object::id_from_address(@0xCC),
                 0, PRICE_MEZZ, PRICE_JUNIOR, // ← zero senior
                 ts::ctx(&mut scenario),
             );
@@ -235,7 +241,7 @@ module securitization::issuance_contract_tests {
         {
             let cap = ts::take_from_sender<IssuanceOwnerCap>(&scenario);
             issuance_contract::create_issuance_state<IOTA>(
-                &cap, object::id_from_address(@0xBB),
+                &cap, object::id_from_address(@0xBB), object::id_from_address(@0xCC),
                 PRICE_SENIOR, 0, PRICE_JUNIOR, // ← zero mezz
                 ts::ctx(&mut scenario),
             );
@@ -257,7 +263,7 @@ module securitization::issuance_contract_tests {
         {
             let cap = ts::take_from_sender<IssuanceOwnerCap>(&scenario);
             issuance_contract::create_issuance_state<IOTA>(
-                &cap, object::id_from_address(@0xBB),
+                &cap, object::id_from_address(@0xBB), object::id_from_address(@0xCC),
                 PRICE_SENIOR, PRICE_MEZZ, 0, // ← zero junior
                 ts::ctx(&mut scenario),
             );
@@ -281,8 +287,9 @@ module securitization::issuance_contract_tests {
         setup_spv_registry(&mut scenario);
 
         ts::next_tx(&mut scenario, ADMIN);
-        let pool_obj_id = create_active_pool(&mut scenario, &clock);
-        create_issuance_state_helper(&mut scenario, pool_obj_id);
+        let pool_obj_id  = create_active_pool(&mut scenario, &clock);
+        let dummy_vault  = object::id_from_address(@0xCC);
+        create_issuance_state_helper(&mut scenario, pool_obj_id, dummy_vault);
         start_issuance_helper(&mut scenario, &clock);
 
         ts::next_tx(&mut scenario, ADMIN);
@@ -313,7 +320,8 @@ module securitization::issuance_contract_tests {
 
         // Create issuance state bound to a DIFFERENT pool ID
         let wrong_pool_id = object::id_from_address(@0xDEAD);
-        create_issuance_state_helper(&mut scenario, wrong_pool_id);
+        let dummy_vault   = object::id_from_address(@0xCC);
+        create_issuance_state_helper(&mut scenario, wrong_pool_id, dummy_vault);
 
         // start_issuance should abort — pool_obj_id mismatch
         ts::next_tx(&mut scenario, ADMIN);
@@ -345,7 +353,8 @@ module securitization::issuance_contract_tests {
 
         ts::next_tx(&mut scenario, ADMIN);
         let pool_obj_id = create_active_pool(&mut scenario, &clock);
-        create_issuance_state_helper(&mut scenario, pool_obj_id);
+        let dummy_vault = object::id_from_address(@0xCC);
+        create_issuance_state_helper(&mut scenario, pool_obj_id, dummy_vault);
 
         ts::next_tx(&mut scenario, ADMIN);
         {
@@ -377,7 +386,8 @@ module securitization::issuance_contract_tests {
 
         ts::next_tx(&mut scenario, ADMIN);
         let pool_obj_id = create_active_pool(&mut scenario, &clock);
-        create_issuance_state_helper(&mut scenario, pool_obj_id);
+        let dummy_vault = object::id_from_address(@0xCC);
+        create_issuance_state_helper(&mut scenario, pool_obj_id, dummy_vault);
         start_issuance_helper(&mut scenario, &clock);
 
         ts::next_tx(&mut scenario, ADMIN);
@@ -402,12 +412,13 @@ module securitization::issuance_contract_tests {
         let clock = clock::create_for_testing(ts::ctx(&mut scenario));
         setup_issuance(&mut scenario);
 
-        let pool_id = object::id_from_address(@0xBB);
+        let pool_id  = object::id_from_address(@0xBB);
+        let vault_id = object::id_from_address(@0xCC);
         ts::next_tx(&mut scenario, ADMIN);
         {
             let cap = ts::take_from_sender<IssuanceOwnerCap>(&scenario);
             issuance_contract::create_issuance_state<IOTA>(
-                &cap, pool_id, PRICE_SENIOR, PRICE_MEZZ, PRICE_JUNIOR,
+                &cap, pool_id, vault_id, PRICE_SENIOR, PRICE_MEZZ, PRICE_JUNIOR,
                 ts::ctx(&mut scenario),
             );
             ts::return_to_sender(&scenario, cap);
@@ -478,8 +489,9 @@ module securitization::issuance_contract_tests {
             ts::return_to_sender(&scenario, cap);
         };
 
-        // Create and start issuance
-        create_issuance_state_helper(&mut scenario, pool_obj_id);
+        // Create and start issuance (vault ID not significant for invest test)
+        let dummy_vault = object::id_from_address(@0xCC);
+        create_issuance_state_helper(&mut scenario, pool_obj_id, dummy_vault);
         start_issuance_helper(&mut scenario, &clock);
 
         // INVESTOR invests 5_000 base units → 5 senior tokens at PRICE_SENIOR=1000
@@ -544,7 +556,8 @@ module securitization::issuance_contract_tests {
         };
 
         // Do NOT whitelist INVESTOR
-        create_issuance_state_helper(&mut scenario, pool_obj_id);
+        let dummy_vault = object::id_from_address(@0xCC);
+        create_issuance_state_helper(&mut scenario, pool_obj_id, dummy_vault);
         start_issuance_helper(&mut scenario, &clock);
 
         // invest should abort — not whitelisted
@@ -619,7 +632,25 @@ module securitization::issuance_contract_tests {
             ts::return_to_sender(&scenario, cap);
         };
 
-        create_issuance_state_helper(&mut scenario, pool_obj_id);
+        // Create vault first so its ID can be wired into the IssuanceState.
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let cap = ts::take_from_sender<VaultAdminCap>(&scenario);
+            payment_vault::create_vault<IOTA>(&cap, ts::ctx(&mut scenario));
+            ts::return_to_sender(&scenario, cap);
+        };
+
+        // Capture vault ID
+        let vault_obj_id;
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let vault    = ts::take_shared<VaultBalance<IOTA>>(&scenario);
+            vault_obj_id = payment_vault::object_id(&vault);
+            ts::return_shared(vault);
+        };
+
+        // Create issuance state with the real vault ID
+        create_issuance_state_helper(&mut scenario, pool_obj_id, vault_obj_id);
         start_issuance_helper(&mut scenario, &clock);
 
         // Invest
@@ -651,7 +682,66 @@ module securitization::issuance_contract_tests {
             ts::return_to_sender(&scenario, cap);
         };
 
-        // Create vault
+        // Release funds
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let cap       = ts::take_from_sender<IssuanceOwnerCap>(&scenario);
+            let mut state = ts::take_shared<IssuanceState<IOTA>>(&scenario);
+            let mut vault = ts::take_shared<VaultBalance<IOTA>>(&scenario);
+            issuance_contract::release_funds_to_vault(&cap, &mut state, &mut vault, &clock);
+            assert!(payment_vault::vault_balance(&vault)            == 10_000, 0);
+            assert!(issuance_contract::vault_balance_value(&state)  == 0,      1);
+            ts::return_shared(vault);
+            ts::return_shared(state);
+            ts::return_to_sender(&scenario, cap);
+        };
+
+        clock::destroy_for_testing(clock);
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = securitization::errors::EWrongVault, location = securitization::issuance_contract)]
+    fun test_release_funds_to_vault_wrong_vault_aborts() {
+        let mut scenario = ts::begin(ADMIN);
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+
+        setup_issuance(&mut scenario);
+        setup_pool_contracts(&mut scenario);
+        setup_spv_registry(&mut scenario);
+        setup_tranche_factory(&mut scenario);
+        setup_compliance(&mut scenario);
+        setup_vault(&mut scenario);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        let pool_obj_id = create_active_pool(&mut scenario, &clock);
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let cap      = ts::take_from_sender<TrancheAdminCap>(&scenario);
+            let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
+            tranche_factory::create_tranches(
+                &cap, &mut reg, pool_obj_id,
+                SENIOR_CAP, MEZZ_CAP, JUNIOR_CAP,
+                INVESTOR, &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_shared(reg);
+            ts::return_to_sender(&scenario, cap);
+        };
+
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let cap      = ts::take_from_sender<ComplianceAdminCap>(&scenario);
+            let mut creg = ts::take_shared<ComplianceRegistry>(&scenario);
+            compliance_registry::add_investor(
+                &cap, &mut creg, INVESTOR, 2, b"US",
+                object::id_from_address(@0xDEAD), 0, &clock,
+            );
+            ts::return_shared(creg);
+            ts::return_to_sender(&scenario, cap);
+        };
+
+        // Create vault but wire a DIFFERENT (dummy) vault_obj_id into the issuance state
         ts::next_tx(&mut scenario, ADMIN);
         {
             let cap = ts::take_from_sender<VaultAdminCap>(&scenario);
@@ -659,15 +749,46 @@ module securitization::issuance_contract_tests {
             ts::return_to_sender(&scenario, cap);
         };
 
-        // Release funds
+        let wrong_vault_id = object::id_from_address(@0xDEAD);
+        create_issuance_state_helper(&mut scenario, pool_obj_id, wrong_vault_id);
+        start_issuance_helper(&mut scenario, &clock);
+
+        // Invest
+        ts::next_tx(&mut scenario, INVESTOR);
+        {
+            let iac       = ts::take_from_sender<IssuanceAdminCap>(&scenario);
+            let mut state = ts::take_shared<IssuanceState<IOTA>>(&scenario);
+            let mut reg   = ts::take_shared<TrancheRegistry>(&scenario);
+            let creg      = ts::take_shared<ComplianceRegistry>(&scenario);
+            let payment   = coin::mint_for_testing<IOTA>(10_000, ts::ctx(&mut scenario));
+            issuance_contract::invest(
+                &mut state, &mut reg, &creg, &iac,
+                tranche_factory::tranche_senior(),
+                payment, &clock, ts::ctx(&mut scenario),
+            );
+            ts::return_shared(creg);
+            ts::return_shared(reg);
+            ts::return_shared(state);
+            ts::return_to_sender(&scenario, iac);
+        };
+
+        // End issuance
         ts::next_tx(&mut scenario, ADMIN);
         {
-            let cap        = ts::take_from_sender<IssuanceOwnerCap>(&scenario);
-            let mut state  = ts::take_shared<IssuanceState<IOTA>>(&scenario);
-            let mut vault  = ts::take_shared<VaultBalance<IOTA>>(&scenario);
+            let cap       = ts::take_from_sender<IssuanceOwnerCap>(&scenario);
+            let mut state = ts::take_shared<IssuanceState<IOTA>>(&scenario);
+            issuance_contract::end_issuance(&cap, &mut state, &clock);
+            ts::return_shared(state);
+            ts::return_to_sender(&scenario, cap);
+        };
+
+        // Release to the real vault — must abort because vault_obj_id != stored ID
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let cap       = ts::take_from_sender<IssuanceOwnerCap>(&scenario);
+            let mut state = ts::take_shared<IssuanceState<IOTA>>(&scenario);
+            let mut vault = ts::take_shared<VaultBalance<IOTA>>(&scenario);
             issuance_contract::release_funds_to_vault(&cap, &mut state, &mut vault, &clock);
-            assert!(payment_vault::vault_balance(&vault)   == 10_000, 0);
-            assert!(issuance_contract::vault_balance_value(&state) == 0, 1);
             ts::return_shared(vault);
             ts::return_shared(state);
             ts::return_to_sender(&scenario, cap);

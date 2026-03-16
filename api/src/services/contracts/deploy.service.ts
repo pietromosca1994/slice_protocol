@@ -194,10 +194,10 @@ export async function deploySecuritizationPackage(): Promise<DeployResult> {
  * PTB sequence (14 commands):
  *  1.  create_pool_unsealed         → pool_state (owned)
  *  2.  pool_obj_id(&pool_state)     → pool_obj_id (ID)
- *  3.  create_issuance_state_unsealed → issuance_state (owned)
- *  4.  issuance_contract::object_id → issuance_state_id (ID)
- *  5.  create_vault_unsealed        → vault (owned)
- *  6.  payment_vault::object_id     → vault_id (ID)
+ *  3.  create_vault_unsealed        → vault (owned)
+ *  4.  payment_vault::object_id     → vault_id (ID)
+ *  5.  create_issuance_state_unsealed(pool_obj_id, vault_id) → issuance_state (owned)
+ *  6.  issuance_contract::object_id → issuance_state_id (ID)
  *  7.  set_contracts
  *  8.  create_tranches
  *  9.  set_contract_objects
@@ -254,38 +254,40 @@ export async function setupPool(
     arguments: [poolState],
   });
 
-  // 3. create_issuance_state_unsealed → issuance_state (owned, not yet shared)
-  const [issuanceState] = txb.moveCall({
-    target: `${packageId}::issuance_contract::create_issuance_state_unsealed`,
-    typeArguments: [body.coinType],
-    arguments: [
-      txb.object(issuanceOwnerCapId),
-      poolObjId,
-      txb.pure.u64(priceSenior),
-      txb.pure.u64(priceMezz),
-      txb.pure.u64(priceJunior),
-    ],
-  });
-
-  // 4. issuance_contract::object_id(&issuance_state) → issuance_state_id
-  const [issuanceStateId] = txb.moveCall({
-    target: `${packageId}::issuance_contract::object_id`,
-    typeArguments: [body.coinType],
-    arguments: [issuanceState],
-  });
-
-  // 5. create_vault_unsealed → vault (owned VaultBalance, not yet shared)
+  // 3. create_vault_unsealed → vault (owned VaultBalance, not yet shared)
+  //    Must precede issuance state creation so vault_id can be wired in.
   const [vault] = txb.moveCall({
     target: `${config.spvPackageId}::payment_vault::create_vault_unsealed`,
     typeArguments: [body.coinType],
     arguments: [txb.object(vaultAdminCapId)],
   });
 
-  // 6. payment_vault::object_id(&vault) → vault_id
+  // 4. payment_vault::object_id(&vault) → vault_id
   const [vaultId] = txb.moveCall({
     target: `${config.spvPackageId}::payment_vault::object_id`,
     typeArguments: [body.coinType],
     arguments: [vault],
+  });
+
+  // 5. create_issuance_state_unsealed → issuance_state (owned, not yet shared)
+  const [issuanceState] = txb.moveCall({
+    target: `${packageId}::issuance_contract::create_issuance_state_unsealed`,
+    typeArguments: [body.coinType],
+    arguments: [
+      txb.object(issuanceOwnerCapId),
+      poolObjId,
+      vaultId,
+      txb.pure.u64(priceSenior),
+      txb.pure.u64(priceMezz),
+      txb.pure.u64(priceJunior),
+    ],
+  });
+
+  // 6. issuance_contract::object_id(&issuance_state) → issuance_state_id
+  const [issuanceStateId] = txb.moveCall({
+    target: `${packageId}::issuance_contract::object_id`,
+    typeArguments: [body.coinType],
+    arguments: [issuanceState],
   });
 
   // 7. set_contracts — deployer addresses (all signer for this deployment)
