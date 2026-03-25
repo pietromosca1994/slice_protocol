@@ -1,7 +1,25 @@
+/// # TrancheFactory
+///
+/// Manages the minting and burning of Senior, Mezzanine, and Junior tranche
+/// tokens for a single pool within the securitisation protocol.
+///
+/// ## Multi-pool change
+/// - `TrancheRegistry` now stores `pool_obj_id: ID`, binding this registry
+///   instance to exactly one `PoolState`. This enables the UI to discover
+///   all `TrancheRegistry` objects belonging to a pool via indexed queries
+///   or event-based indexing.
+/// - `create_tranches` requires the pool object ID to be passed in so it can
+///   be stored and emitted in events.
+///
+/// ## IOTA Move design notes
+/// - Uses Option<TreasuryCap<T>> so the registry can be shared before
+///   treasuries are injected by `bootstrap`.
+/// - `IssuanceAdminCap` is transferred to the `issuance_contract` address
+///   during `create_tranches` so only it can call `mint`.
 #[allow(duplicate_alias, unused_use, lint(self_transfer))]
 module securitization::tranche_factory {
     use iota::coin::{Self, Coin, TreasuryCap};
-    use iota::object::{Self, UID};
+    use iota::object::{Self, UID, ID};
     use iota::transfer;
     use iota::tx_context::{Self, TxContext};
     use iota::clock::{Self, Clock};
@@ -16,13 +34,19 @@ module securitization::tranche_factory {
     const TRANCHE_MEZZ:   u8 = 1;
     const TRANCHE_JUNIOR: u8 = 2;
 
+    // ─── Capabilities ─────────────────────────────────────────────────────────
+
     public struct TrancheAdminCap has key, store { id: UID }
     public struct IssuanceAdminCap has key, store { id: UID }
 
-    /// Uses Option<TreasuryCap<T>> so the registry can be shared before
-    /// treasuries are injected by `bootstrap`.
+    // ─── Shared registry ──────────────────────────────────────────────────────
+
+    /// One `TrancheRegistry` is created per pool. The `pool_obj_id` field
+    /// binds it to the corresponding `PoolState` for enumeration purposes.
     public struct TrancheRegistry has key {
         id:                UID,
+        /// Object ID of the `PoolState` this registry belongs to.
+        pool_obj_id:       ID,
         senior_supply_cap: u64,
         mezz_supply_cap:   u64,
         junior_supply_cap: u64,
@@ -48,13 +72,15 @@ module securitization::tranche_factory {
 
     // ─── Init ─────────────────────────────────────────────────────────────────
 
-    /// Only the OTW + TxContext pattern is valid here.
-    /// Creates an empty registry shell; `bootstrap` must be called next.
     public struct TRANCHE_FACTORY has drop {}
 
+    /// Creates the initial (empty) registry shell with a sentinel `pool_obj_id`.
+    /// The real pool binding is established when `create_tranches` is called.
+    /// `bootstrap` must be called before any minting.
     fun init(_witness: TRANCHE_FACTORY, ctx: &mut TxContext) {
         let registry = TrancheRegistry {
             id:                object::new(ctx),
+            pool_obj_id:       object::id_from_address(@0x0), // placeholder; set in create_tranches
             senior_supply_cap: 0,
             mezz_supply_cap:   0,
             junior_supply_cap: 0,
@@ -75,12 +101,11 @@ module securitization::tranche_factory {
         transfer::transfer(admin_cap, tx_context::sender(ctx));
     }
 
-    // ─── Bootstrap (replaces the invalid init wiring) ─────────────────────────
+    // ─── Bootstrap ────────────────────────────────────────────────────────────
 
     /// Callable once by the admin immediately after publish.
     /// Extracts the TreasuryCaps from the coin parking wrappers and
-    /// injects them into the registry. Can be called in the same publish
-    /// transaction or a subsequent one.
+    /// injects them into the registry.
     public entry fun bootstrap(
         _cap:           &TrancheAdminCap,
         registry:       &mut TrancheRegistry,
@@ -98,7 +123,7 @@ module securitization::tranche_factory {
         registry.bootstrapped = true;
     }
 
-    // ─── Internal helpers to unwrap Option<TreasuryCap<T>> ───────────────────
+    // ─── Internal helpers ─────────────────────────────────────────────────────
 
     fun senior_treasury_mut(registry: &mut TrancheRegistry): &mut TreasuryCap<SENIOR_COIN> {
         option::borrow_mut(&mut registry.senior_treasury)
@@ -110,12 +135,20 @@ module securitization::tranche_factory {
         option::borrow_mut(&mut registry.junior_treasury)
     }
 
-    // ─── create_tranches, mint, melt_*, disable_minting, get_tranche_info ─────
-    // (unchanged from your original — just ensure bootstrap guard where needed)
+    // ─── Tranche configuration ────────────────────────────────────────────────
 
+    /// Configure supply caps and bind this registry to a pool and issuance contract.
+    ///
+    /// # Multi-pool change
+    /// `pool_obj_id` is now required so this registry can be queried by pool.
+    ///
+    /// # Parameters
+    /// - `pool_obj_id`        Object ID of the owning `PoolState`
+    /// - `issuance_contract`  Address that will receive the `IssuanceAdminCap`
     public entry fun create_tranches(
         _cap:              &TrancheAdminCap,
         registry:          &mut TrancheRegistry,
+        pool_obj_id:       ID,
         senior_cap:        u64,
         mezz_cap:          u64,
         junior_cap:        u64,
@@ -123,13 +156,14 @@ module securitization::tranche_factory {
         clock:             &Clock,
         ctx:               &mut TxContext,
     ) {
-        assert!(registry.bootstrapped,      errors::tranches_not_created()); // must bootstrap first
+        assert!(registry.bootstrapped,      errors::tranches_not_created());
         assert!(!registry.tranches_created, errors::tranches_already_created());
         assert!(senior_cap > 0,             errors::zero_supply_cap());
         assert!(mezz_cap   > 0,             errors::zero_supply_cap());
         assert!(junior_cap > 0,             errors::zero_supply_cap());
         assert!(issuance_contract != @0x0,  errors::not_issuance_contract());
 
+        registry.pool_obj_id       = pool_obj_id;
         registry.senior_supply_cap = senior_cap;
         registry.mezz_supply_cap   = mezz_cap;
         registry.junior_supply_cap = junior_cap;
@@ -145,6 +179,8 @@ module securitization::tranche_factory {
             clock::timestamp_ms(clock),
         );
     }
+
+    // ─── Minting ──────────────────────────────────────────────────────────────
 
     public entry fun mint(
         _cap:         &IssuanceAdminCap,
@@ -195,6 +231,8 @@ module securitization::tranche_factory {
         );
     }
 
+    // ─── Burning ──────────────────────────────────────────────────────────────
+
     public entry fun melt_senior(
         registry: &mut TrancheRegistry,
         coin:     Coin<SENIOR_COIN>,
@@ -240,10 +278,25 @@ module securitization::tranche_factory {
         events::emit_minting_disabled(clock::timestamp_ms(clock));
     }
 
-    public fun get_tranche_info(
-        registry:     &TrancheRegistry,
-        tranche_type: u8,
-    ): TrancheInfo {
+    // ─── Read-only accessors ──────────────────────────────────────────────────
+
+    public fun pool_obj_id(r: &TrancheRegistry): ID        { r.pool_obj_id }
+    public fun senior_supply_cap(r: &TrancheRegistry): u64 { r.senior_supply_cap }
+    public fun mezz_supply_cap(r: &TrancheRegistry): u64   { r.mezz_supply_cap }
+    public fun junior_supply_cap(r: &TrancheRegistry): u64 { r.junior_supply_cap }
+    public fun senior_minted(r: &TrancheRegistry): u64     { r.senior_minted }
+    public fun mezz_minted(r: &TrancheRegistry): u64       { r.mezz_minted }
+    public fun junior_minted(r: &TrancheRegistry): u64     { r.junior_minted }
+    public fun minting_enabled(r: &TrancheRegistry): bool  { r.minting_enabled }
+    public fun tranches_created(r: &TrancheRegistry): bool { r.tranches_created }
+    public fun issuance_contract(r: &TrancheRegistry): address { r.issuance_contract }
+    public fun bootstrapped(r: &TrancheRegistry): bool     { r.bootstrapped }
+
+    public fun senior_remaining(r: &TrancheRegistry): u64 { r.senior_supply_cap - r.senior_minted }
+    public fun mezz_remaining(r: &TrancheRegistry): u64   { r.mezz_supply_cap   - r.mezz_minted }
+    public fun junior_remaining(r: &TrancheRegistry): u64 { r.junior_supply_cap - r.junior_minted }
+
+    public fun get_tranche_info(registry: &TrancheRegistry, tranche_type: u8): TrancheInfo {
         assert!(
             tranche_type == TRANCHE_SENIOR ||
             tranche_type == TRANCHE_MEZZ   ||
@@ -266,22 +319,6 @@ module securitization::tranche_factory {
         }
     }
 
-    // ─── Read-only accessors (unchanged) ─────────────────────────────────────
-    public fun senior_supply_cap(r: &TrancheRegistry): u64     { r.senior_supply_cap }
-    public fun mezz_supply_cap(r: &TrancheRegistry): u64       { r.mezz_supply_cap }
-    public fun junior_supply_cap(r: &TrancheRegistry): u64     { r.junior_supply_cap }
-    public fun senior_minted(r: &TrancheRegistry): u64         { r.senior_minted }
-    public fun mezz_minted(r: &TrancheRegistry): u64           { r.mezz_minted }
-    public fun junior_minted(r: &TrancheRegistry): u64         { r.junior_minted }
-    public fun minting_enabled(r: &TrancheRegistry): bool      { r.minting_enabled }
-    public fun tranches_created(r: &TrancheRegistry): bool     { r.tranches_created }
-    public fun issuance_contract(r: &TrancheRegistry): address { r.issuance_contract }
-    public fun bootstrapped(r: &TrancheRegistry): bool         { r.bootstrapped }
-
-    public fun senior_remaining(r: &TrancheRegistry): u64 { r.senior_supply_cap - r.senior_minted }
-    public fun mezz_remaining(r: &TrancheRegistry): u64   { r.mezz_supply_cap - r.mezz_minted }
-    public fun junior_remaining(r: &TrancheRegistry): u64 { r.junior_supply_cap - r.junior_minted }
-
     public fun info_tranche_type(i: &TrancheInfo): u8     { i.tranche_type }
     public fun info_supply_cap(i: &TrancheInfo): u64      { i.supply_cap }
     public fun info_amount_minted(i: &TrancheInfo): u64   { i.amount_minted }
@@ -298,6 +335,7 @@ module securitization::tranche_factory {
     public fun init_for_testing(ctx: &mut TxContext) {
         let registry = TrancheRegistry {
             id:                object::new(ctx),
+            pool_obj_id:       object::id_from_address(@0x0),
             senior_supply_cap: 0,
             mezz_supply_cap:   0,
             junior_supply_cap: 0,

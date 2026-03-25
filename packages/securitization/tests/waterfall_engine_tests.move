@@ -13,6 +13,7 @@
 module securitization::waterfall_engine_tests {
     use iota::test_scenario::{Self as ts};
     use iota::clock::{Self, Clock};
+    use iota::object;
     use securitization::waterfall_engine::{
         Self, WaterfallState, WaterfallAdminCap, PoolCap,
     };
@@ -44,6 +45,7 @@ module securitization::waterfall_engine_tests {
             let mut state = ts::take_shared<WaterfallState>(scenario);
             waterfall_engine::initialise_waterfall(
                 &cap, &mut state,
+                object::id_from_address(@0xBB), // pool_obj_id
                 5_000_000,  // senior outstanding
                 3_000_000,  // mezz outstanding
                 2_000_000,  // junior outstanding

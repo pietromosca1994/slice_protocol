@@ -44,6 +44,7 @@ module securitization::tranche_factory_tests {
     use iota::test_scenario::{Self as ts, Scenario};
     use iota::clock::{Self, Clock};
     use iota::coin::{Self, Coin};
+    use iota::object;
 
     // Coin types now come from their own modules
     use securitization::senior_coin::SENIOR_COIN;
@@ -94,6 +95,7 @@ module securitization::tranche_factory_tests {
             let mut reg  = ts::take_shared<TrancheRegistry>(scenario);
             tranche_factory::create_tranches(
                 &cap, &mut reg,
+                object::id_from_address(@0xBB),
                 SENIOR_CAP, MEZZ_CAP, JUNIOR_CAP,
                 ISSUANCE_CONTRACT,
                 clock,
@@ -239,6 +241,7 @@ module securitization::tranche_factory_tests {
             let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
             tranche_factory::create_tranches(
                 &cap, &mut reg,
+                object::id_from_address(@0xBB),
                 SENIOR_CAP, MEZZ_CAP, JUNIOR_CAP,
                 ISSUANCE_CONTRACT, &clock, ts::ctx(&mut scenario),
             );
@@ -263,6 +266,7 @@ module securitization::tranche_factory_tests {
             let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
             tranche_factory::create_tranches(
                 &cap, &mut reg,
+                object::id_from_address(@0xBB),
                 0, MEZZ_CAP, JUNIOR_CAP,          // ← zero senior cap
                 ISSUANCE_CONTRACT, &clock, ts::ctx(&mut scenario),
             );
@@ -287,6 +291,7 @@ module securitization::tranche_factory_tests {
             let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
             tranche_factory::create_tranches(
                 &cap, &mut reg,
+                object::id_from_address(@0xBB),
                 SENIOR_CAP, 0, JUNIOR_CAP,        // ← zero mezz cap
                 ISSUANCE_CONTRACT, &clock, ts::ctx(&mut scenario),
             );
@@ -311,6 +316,7 @@ module securitization::tranche_factory_tests {
             let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
             tranche_factory::create_tranches(
                 &cap, &mut reg,
+                object::id_from_address(@0xBB),
                 SENIOR_CAP, MEZZ_CAP, 0,          // ← zero junior cap
                 ISSUANCE_CONTRACT, &clock, ts::ctx(&mut scenario),
             );
@@ -336,6 +342,7 @@ module securitization::tranche_factory_tests {
             let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
             tranche_factory::create_tranches(
                 &cap, &mut reg,
+                object::id_from_address(@0xBB),
                 SENIOR_CAP, MEZZ_CAP, JUNIOR_CAP,
                 @0x0,                              // ← zero address
                 &clock, ts::ctx(&mut scenario),
@@ -906,6 +913,7 @@ module securitization::tranche_factory_tests {
             let mut reg  = ts::take_shared<TrancheRegistry>(&scenario);
             tranche_factory::create_tranches(
                 &cap, &mut reg,
+                object::id_from_address(@0xBB),
                 SENIOR_CAP, MEZZ_CAP, JUNIOR_CAP,
                 ISSUANCE_CONTRACT, &clock, ts::ctx(&mut scenario),
             );
