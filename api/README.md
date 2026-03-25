@@ -21,6 +21,7 @@ contracts. If the PTB aborts for any reason the `SPVRegistry` is left untouched.
 | `PORT` | No | Server port (default `3000`) |
 | `LOG_LEVEL` | No | `fatal`/`error`/`warn`/`info`/`debug`/`trace` (default `info`) |
 | `GAS_BUDGET` | No | Gas budget per transaction in MIST (default `100000000`) |
+| `PUBLISH_GAS_BUDGET` | No | Gas budget for package publish transactions in MIST (default `2000000000`) |
 | `IOTA_RPC_URL` | No | Override RPC URL (defaults to network standard) |
 | `PACKAGES_PATH` | No | Absolute path to the repo's `packages/` directory. Auto-detected locally; set to `/app/packages` in Docker (done automatically by the Dockerfile). |
 
@@ -83,6 +84,7 @@ Returns node connectivity status and API configuration.
   "status": "ok",
   "network": "testnet",
   "chainId": "...",
+  "rpcUrl": "https://api.testnet.iota.cafe",
   "readOnly": false,
   "spvRegistryId": "0x..."
 }
@@ -181,7 +183,7 @@ Field notes:
 - `seniorSupplyCap`/`mezzSupplyCap`/`juniorSupplyCap`: maximum token supply per tranche (number of tokens)
 - `seniorFaceValue`/`mezzFaceValue`/`juniorFaceValue`: principal outstanding per tranche in stablecoin base units; used directly as waterfall outstanding. Token price is derived as `faceValue / supplyCap`.
 - `paymentFrequency`: `0` = Monthly, `1` = Quarterly
-- `assetHash`: 64 hex characters (SHA-256 of off-chain legal documents)
+- `assetHash`: 64 hex characters with optional `0x` prefix (SHA-256 of off-chain legal documents)
 - `coinType`: Move type string of the stablecoin used for issuance
 
 Response (HTTP 201):
