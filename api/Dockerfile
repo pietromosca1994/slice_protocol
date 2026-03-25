@@ -4,11 +4,16 @@
 
 # URL to the pre-built iota CLI binary for the target platform.
 # Find the correct URL at https://github.com/iotaledger/iota/releases
-ARG IOTA_CLI_URL=https://github.com/iotaledger/iota/releases/latest/download/iota-linux-x86_64
+ARG IOTA_CLI_URL=https://github.com/iotaledger/iota/releases/download/v1.19.1/iota-v1.19.1-linux-x86_64.tgz
 
 # ── Stage 1: build ────────────────────────────────────────────────────────────
 FROM node:20-slim AS builder
 
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl git-all cmake gcc libssl-dev pkg-config libclang-dev build-essential && \
+    rm -rf /var/lib/apt/lists/*
+    
 WORKDIR /app
 
 COPY api/package*.json ./
@@ -29,10 +34,12 @@ ARG IOTA_CLI_URL
 
 # Install runtime system dependencies and the iota CLI binary
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl ca-certificates libssl3 && \
+      curl ca-certificates libssl3 tar libpq5 && \
     rm -rf /var/lib/apt/lists/* && \
-    curl -sL "${IOTA_CLI_URL}" -o /usr/local/bin/iota && \
-    chmod +x /usr/local/bin/iota
+    curl -sL "${IOTA_CLI_URL}" -o /tmp/iota.tgz && \
+    tar -xzf /tmp/iota.tgz -C /usr/local/bin/ && \
+    chmod +x /usr/local/bin/iota && \
+    rm /tmp/iota.tgz
 
 # Non-root user for security
 RUN groupadd -r appgroup && useradd -r -g appgroup appuser
