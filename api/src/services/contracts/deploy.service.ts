@@ -6,6 +6,7 @@
  */
 import { execSync } from "child_process";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import { Transaction } from "@iota/iota-sdk/transactions";
 import { signAndExecute, getKeypair, iotaClient } from "../iota-client";
@@ -91,6 +92,7 @@ function extractSharedObjectId(objectChanges: any[], typeSuffix: string): string
 export async function deploySecuritizationPackage(): Promise<DeployResult> {
   const kp      = getKeypair();
   const sender  = kp.getPublicKey().toIotaAddress();
+
   // Resolve the packages/ directory.
   // In Docker: PACKAGES_PATH env var points to the copied packages/ directory.
   // Locally: auto-detect by walking up from __dirname (src/services/contracts → repo root).
@@ -98,92 +100,116 @@ export async function deploySecuritizationPackage(): Promise<DeployResult> {
     ?? path.join(__dirname, "../../../../packages");
 
   // ── Step 1: Build bytecode ───────────────────────────────────────────────
-  // Patch Move.toml to inject the deployed spv address, then restore it.
-  const moveTomlPath = path.join(packagesPath, "securitization/Move.toml");
-  const moveTomlOriginal = fs.readFileSync(moveTomlPath, "utf8");
-  const moveTomlPatched = moveTomlOriginal.replace(
-    /^(spv\s*=\s*)"[^"]*"/m,
-    `$1"${config.spvPackageId}"`,
-  );
+  // Copy the ENTIRE packages/ directory to a temp location so that:
+  //   1. `iota move build` can write its `build/` output freely (no permission issues)
+  //   2. Local sibling dependencies (e.g. `spv`) referenced in Move.toml are present
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), "packages-"));
+  const tmpDir  = path.join(tmpBase, "securitization");
+  logger.info({ tmpBase }, "Copying packages/ to temp dir for build…");
 
-  logger.info("Building securitization package bytecode…");
-  let buildOutput: string;
   try {
-    fs.writeFileSync(moveTomlPath, moveTomlPatched, "utf8");
-    buildOutput = execSync(
-      `iota move build --dump-bytecode-as-base64 --path "${packagesPath}/securitization"`,
-      { encoding: "utf8" },
+    // Copy the whole packages/ tree so relative local deps resolve correctly
+    execSync(`cp -r "${packagesPath}/." "${tmpBase}"`, { encoding: "utf8" });
+
+    // Patch Move.toml in the temp copy to inject the deployed spv address
+    const moveTomlPath = path.join(tmpDir, "Move.toml");
+    const moveTomlOriginal = fs.readFileSync(moveTomlPath, "utf8");
+    const moveTomlPatched = moveTomlOriginal.replace(
+      /^(spv\s*=\s*)"[^"]*"/m,
+      `$1"${config.spvPackageId}"`,
     );
+    fs.writeFileSync(moveTomlPath, moveTomlPatched, "utf8");
+
+    logger.info("Building securitization package bytecode…");
+    let buildOutput: string;
+    try {
+      buildOutput = execSync(
+        `iota move build --dump-bytecode-as-base64 --path "${tmpDir}"`,
+        { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+      );
+    } catch (err: any) {
+      const stderr = err?.stderr ?? "";
+      const stdout = err?.stdout ?? "";
+      logger.error({ stderr, stdout }, "iota move build failed");
+      throw new Error(`iota move build failed:\nSTDERR: ${stderr}\nSTDOUT: ${stdout}`);
+    }
+
+    const { modules, dependencies } = JSON.parse(buildOutput) as {
+      modules:      string[];
+      dependencies: string[];
+    };
+
+    // ── Step 2: Publish ────────────────────────────────────────────────────
+    logger.info("Publishing securitization package…");
+    const publishTxb = new Transaction();
+    publishTxb.setSender(sender);
+    const [upgradeCap] = publishTxb.publish({ modules, dependencies });
+    publishTxb.transferObjects([upgradeCap], sender);
+
+    // Pass null so the SDK auto-estimates gas via devInspect (same as `iota client publish`)
+    const { digest: publishDigest, objectChanges: publishChanges } = await signAndExecute(publishTxb, null);
+    logger.info({ digest: publishDigest }, "Securitization package published");
+
+    // Wait for the package to be indexed before the bootstrap call
+    await iotaClient.waitForTransaction({ digest: publishDigest });
+    logger.info("Package indexed, proceeding to bootstrap…");
+
+    // Extract package ID from the "published" entry
+    const publishedEntry = publishChanges.find((o: any) => o.type === "published");
+    if (!publishedEntry?.packageId) {
+      throw new Error("Could not find packageId in publish objectChanges");
+    }
+    const packageId = publishedEntry.packageId as string;
+    logger.info({ packageId }, "Securitization package ID");
+
+    // Extract capability and object IDs
+    const adminCapId          = extractObjectId(publishChanges, "::pool_contract::AdminCap");
+    const trancheAdminCapId   = extractObjectId(publishChanges, "::tranche_factory::TrancheAdminCap");
+    const trancheRegistryId   = extractSharedObjectId(publishChanges, "::tranche_factory::TrancheRegistry");
+    const waterfallStateId    = extractSharedObjectId(publishChanges, "::waterfall_engine::WaterfallState");
+    const waterfallAdminCapId = extractObjectId(publishChanges, "::waterfall_engine::WaterfallAdminCap");
+    const issuanceOwnerCapId  = extractObjectId(publishChanges, "::issuance_contract::IssuanceOwnerCap");
+    const seniorTreasuryId    = extractSharedObjectId(publishChanges, "::senior_coin::SeniorTreasury");
+    const mezzTreasuryId      = extractSharedObjectId(publishChanges, "::mezz_coin::MezzTreasury");
+    const juniorTreasuryId    = extractSharedObjectId(publishChanges, "::junior_coin::JuniorTreasury");
+
+    // ── Step 3: Bootstrap (inject TreasuryCaps into TrancheRegistry) ──────
+    logger.info("Running tranche_factory::bootstrap…");
+    const bootstrapTxb = new Transaction();
+    bootstrapTxb.moveCall({
+      target: `${packageId}::tranche_factory::bootstrap`,
+      arguments: [
+        bootstrapTxb.object(trancheAdminCapId),
+        bootstrapTxb.object(trancheRegistryId),
+        bootstrapTxb.object(seniorTreasuryId),
+        bootstrapTxb.object(mezzTreasuryId),
+        bootstrapTxb.object(juniorTreasuryId),
+      ],
+    });
+    const { digest: bootstrapDigest } = await signAndExecute(bootstrapTxb);
+    logger.info({ digest: bootstrapDigest }, "Bootstrap complete");
+
+    return {
+      packageId,
+      adminCapId,
+      trancheAdminCapId,
+      trancheRegistryId,
+      waterfallStateId,
+      waterfallAdminCapId,
+      issuanceOwnerCapId,
+      seniorTreasuryId,
+      mezzTreasuryId,
+      juniorTreasuryId,
+    };
   } finally {
-    fs.writeFileSync(moveTomlPath, moveTomlOriginal, "utf8");
+    // Always clean up the entire temp base directory
+    try {
+      fs.rmSync(tmpBase, { recursive: true, force: true });
+      logger.info({ tmpBase }, "Temp build directory cleaned up");
+    } catch (cleanupErr) {
+      logger.warn({ tmpBase, cleanupErr }, "Failed to clean up temp build directory");
+    }
   }
-  const { modules, dependencies } = JSON.parse(buildOutput) as {
-    modules:      string[];
-    dependencies: string[];
-  };
-
-  // ── Step 2: Publish ──────────────────────────────────────────────────────
-  logger.info("Publishing securitization package…");
-  const publishTxb = new Transaction();
-  publishTxb.setSender(sender);
-  const [upgradeCap] = publishTxb.publish({ modules, dependencies });
-  publishTxb.transferObjects([upgradeCap], sender);
-
-  // Pass null so the SDK auto-estimates gas via devInspect (same as `iota client publish`)
-  const { digest: publishDigest, objectChanges: publishChanges } = await signAndExecute(publishTxb, null);
-  logger.info({ digest: publishDigest }, "Securitization package published");
-
-  // Wait for the package to be indexed before the bootstrap call
-  await iotaClient.waitForTransaction({ digest: publishDigest });
-  logger.info("Package indexed, proceeding to bootstrap…");
-
-  // Extract package ID from the "published" entry
-  const publishedEntry = publishChanges.find((o: any) => o.type === "published");
-  if (!publishedEntry?.packageId) {
-    throw new Error("Could not find packageId in publish objectChanges");
-  }
-  const packageId = publishedEntry.packageId as string;
-  logger.info({ packageId }, "Securitization package ID");
-
-  // Extract capability and object IDs
-  const adminCapId          = extractObjectId(publishChanges, "::pool_contract::AdminCap");
-  const trancheAdminCapId   = extractObjectId(publishChanges, "::tranche_factory::TrancheAdminCap");
-  const trancheRegistryId   = extractSharedObjectId(publishChanges, "::tranche_factory::TrancheRegistry");
-  const waterfallStateId    = extractSharedObjectId(publishChanges, "::waterfall_engine::WaterfallState");
-  const waterfallAdminCapId = extractObjectId(publishChanges, "::waterfall_engine::WaterfallAdminCap");
-  const issuanceOwnerCapId  = extractObjectId(publishChanges, "::issuance_contract::IssuanceOwnerCap");
-  const seniorTreasuryId    = extractSharedObjectId(publishChanges, "::senior_coin::SeniorTreasury");
-  const mezzTreasuryId      = extractSharedObjectId(publishChanges, "::mezz_coin::MezzTreasury");
-  const juniorTreasuryId    = extractSharedObjectId(publishChanges, "::junior_coin::JuniorTreasury");
-
-  // ── Step 3: Bootstrap (inject TreasuryCaps into TrancheRegistry) ─────────
-  logger.info("Running tranche_factory::bootstrap…");
-  const bootstrapTxb = new Transaction();
-  bootstrapTxb.moveCall({
-    target: `${packageId}::tranche_factory::bootstrap`,
-    arguments: [
-      bootstrapTxb.object(trancheAdminCapId),
-      bootstrapTxb.object(trancheRegistryId),
-      bootstrapTxb.object(seniorTreasuryId),
-      bootstrapTxb.object(mezzTreasuryId),
-      bootstrapTxb.object(juniorTreasuryId),
-    ],
-  });
-  const { digest: bootstrapDigest } = await signAndExecute(bootstrapTxb);
-  logger.info({ digest: bootstrapDigest }, "Bootstrap complete");
-
-  return {
-    packageId,
-    adminCapId,
-    trancheAdminCapId,
-    trancheRegistryId,
-    waterfallStateId,
-    waterfallAdminCapId,
-    issuanceOwnerCapId,
-    seniorTreasuryId,
-    mezzTreasuryId,
-    juniorTreasuryId,
-  };
 }
 
 /**

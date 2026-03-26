@@ -34,15 +34,25 @@ ARG IOTA_CLI_URL
 
 # Install runtime system dependencies and the iota CLI binary
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl ca-certificates libssl3 tar libpq5 && \
+      curl ca-certificates libssl3 tar libpq5 git && \
     rm -rf /var/lib/apt/lists/* && \
     curl -sL "${IOTA_CLI_URL}" -o /tmp/iota.tgz && \
     tar -xzf /tmp/iota.tgz -C /usr/local/bin/ && \
     chmod +x /usr/local/bin/iota && \
     rm /tmp/iota.tgz
 
-# Non-root user for security
-RUN groupadd -r appgroup && useradd -r -g appgroup appuser
+# Non-root user for security — create home dir and writable cache dirs for iota CLI
+RUN groupadd -r appgroup && useradd -r -g appgroup -m -d /home/appuser appuser && \
+    mkdir -p /home/appuser/.move /home/appuser/.iota/iota_config && \
+    chown -R appuser:appgroup /home/appuser
+
+ENV HOME=/home/appuser
+
+# Pre-initialise the iota CLI as appuser so `iota move build` never hits the
+# interactive first-run wizard. Generates a throw-away ed25519 keypair pointed
+# at testnet. The keypair is only used for compilation — all actual signing uses
+# the app's own key management.
+RUN su appuser -c "printf 'testnet\n0\n' | iota client --yes 2>&1 || true"
 
 WORKDIR /app
 
